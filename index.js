@@ -1,3 +1,5 @@
+import { EmbedBuilder } from
+"discord.js";  
 import {
   Client,
   GatewayIntentBits,
