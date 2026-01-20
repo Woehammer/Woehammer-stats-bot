@@ -2,8 +2,8 @@
 // Discord.js v14+
 // Env vars required:
 // - DISCORD_TOKEN
-// - SHEET_WARSCROLL_CSV_URL
-// - SHEET_FACTION_CSV_URL   (optional until your faction sheet is ready)
+// - SHEET_CSV_URL
+// - FACTION_CSV_URL   (optional until your faction sheet is ready)
 // Optional:
 // - ADMIN_USER_IDS          (comma-separated Discord user IDs who can /refresh)
 // - MIN_GAMES               (default 5)
@@ -24,8 +24,8 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
 
-const WARSCROLL_CSV_URL = process.env.SHEET_WARSCROLL_CSV_URL;
-const FACTION_CSV_URL = process.env.SHEET_FACTION_CSV_URL;
+const WARSCROLL_CSV_URL = process.env.SHEET_CSV_URL;
+const FACTION_CSV_URL = process.env.FACTION_CSV_URL;
 
 const MIN_GAMES = Number(process.env.MIN_GAMES ?? 5);
 
@@ -153,7 +153,7 @@ function nowStamp() {
 }
 
 async function loadWarscrollData({ force = false } = {}) {
-  if (!WARSCROLL_CSV_URL) throw new Error("Missing SHEET_WARSCROLL_CSV_URL env var");
+  if (!WARSCROLL_CSV_URL) throw new Error("Missing SHEET_CSV_URL env var");
 
   if (!force && warscrollCache.headers && warscrollCache.rows) return warscrollCache;
 
@@ -627,7 +627,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const embed = baseEmbed()
           .setTitle("Faction sheet not configured")
           .setDescription(
-            `You haven’t set **SHEET_FACTION_CSV_URL** yet.\n\n` +
+            `You haven’t set **FACTION_CSV_URL** yet.\n\n` +
               `Once you do, \`/faction\` will work.\n\n${cacheFooter()}`
           );
         return interaction.editReply({ embeds: [embed], content: "" });
