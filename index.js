@@ -1,52 +1,26 @@
-// index.js
-// Woehammer Stats Bot (Discord.js v14)
-// Commands: /help /peek /refresh (admin-only) /warscroll /common /leastcommon /impact /compare
-// Data source: Google Sheets published as CSV (SHEET_CSV_URL)
-// Caching: in-memory with optional manual refresh
-
 import {
   Client,
   GatewayIntentBits,
   SlashCommandBuilder,
-  EmbedBuilder,
+  PermissionFlagsBits,
 } from "discord.js";
 
-/* -------------------- Config -------------------- */
-
+/* =========================
+   Config
+========================= */
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-const CSV_URL = process.env.SHEET_CSV_URL;
-const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const WARSCR_CSV_URL = process.env.SHEET_CSV_URL;     // warscroll sheet CSV
+const FACTION_CSV_URL = process.env.FACTION_CSV_URL;  // BOT_FACTION sheet CSV
 
-// Admin-only refresh: put YOUR Discord user ID in Railway env var ADMIN_USER_IDS
-// Example: "123456789012345678,987654321098765432"
-const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+if (!WARSCR_CSV_URL) console.warn("⚠️ Missing SHEET_CSV_URL (warscroll CSV).");
+if (!FACTION_CSV_URL) console.warn("⚠️ Missing FACTION_CSV_URL (faction CSV).");
 
-// Ignore low sample rows
-const MIN_GAMES = Number(process.env.MIN_GAMES || 5);
-
-// Optional: auto-refresh every X hours (0 = off)
-const AUTO_REFRESH_HOURS = Number(process.env.AUTO_REFRESH_HOURS || 0);
-
-/* -------------------- Cache -------------------- */
-
-let cache = {
-  loadedAt: 0,
-  headers: [],
-  rows: [],
-};
-
-function nowMs() {
-  return Date.now();
-}
-
-/* -------------------- Helpers -------------------- */
-
-function normalise(str) {
-  return String(str ?? "")
+/* =========================
+   Normalisation helpers
+========================= */
+function normalise(str = "") {
+  return str
     .toLowerCase()
     .replace(/^the\s+/i, "")
     .replace(/[^a-z0-9 ]/g, "")
@@ -54,520 +28,562 @@ function normalise(str) {
     .trim();
 }
 
-function parsePercent(value) {
-  // Accepts: "47%", "47", "47.0", ""
-  if (value == null) return NaN;
-  const s = String(value).trim().replace("%", "");
-  if (!s) return NaN;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : NaN;
+function parsePercent(val) {
+  // accepts "53.8%" or "53.8" or "" -> number
+  if (val == null) return null;
+  const s = String(val).trim();
+  if (!s) return null;
+  const num = Number(s.replace("%", ""));
+  return Number.isFinite(num) ? num : null;
 }
 
-function parseNumber(value) {
-  if (value == null) return NaN;
-  const s = String(value).trim();
-  if (!s) return NaN;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : NaN;
+function parseNumber(val) {
+  if (val == null) return null;
+  const s = String(val).trim();
+  if (!s) return null;
+  const num = Number(s);
+  return Number.isFinite(num) ? num : null;
 }
 
-// Robust CSV split for basic CSV (Google Sheets export is usually simple).
-// If you later hit commas inside quoted text, switch to a real CSV parser.
-function splitCSVLine(line) {
-  const out = [];
-  let cur = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"' && line[i + 1] === '"') {
-      // escaped quote
-      cur += '"';
-      i++;
-      continue;
-    }
-    if (ch === '"') {
-      inQuotes = !inQuotes;
-      continue;
-    }
-    if (ch === "," && !inQuotes) {
-      out.push(cur.trim());
-      cur = "";
-      continue;
-    }
-    cur += ch;
-  }
-  out.push(cur.trim());
-  return out.map((c) => c.replace(/^"|"$/g, "").trim());
+function hasMinGames(rowObj, minGames = 5) {
+  const g = parseNumber(rowObj["Games"]);
+  return g != null && g >= minGames;
 }
 
-async function fetchCSV() {
-  if (!CSV_URL) throw new Error("Missing SHEET_CSV_URL env var");
-  const res = await fetch(CSV_URL);
-  if (!res.ok) throw new Error(`CSV fetch failed: ${res.status} ${res.statusText}`);
+/* =========================
+   CSV loading + caching
+   (fast + sheet only updates weekly)
+========================= */
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours (adjust)
+let warscrollCache = { at: 0, headers: [], rows: [] };
+let factionCache = { at: 0, headers: [], rows: [] };
+
+async function loadCSV(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Failed CSV fetch (${res.status})`);
   const text = await res.text();
 
+  // naive CSV split (works if your sheet is simple, which yours is)
   const rows = text
     .split("\n")
-    .map((r) => r.replace(/\r$/, ""))
-    .filter((r) => r.trim().length > 0)
-    .map((r) => splitCSVLine(r))
-    .filter((r) => r.length > 1);
+    .map(r =>
+      r
+        .split(",")
+        .map(c => c.replace(/^"|"$/g, "").trim())
+    )
+    .filter(r => r.length > 1);
 
   const headers = rows.shift() || [];
   return { headers, rows };
 }
 
-async function ensureCacheLoaded(force = false) {
-  if (!force && cache.rows.length && cache.loadedAt) return cache;
-  const { headers, rows } = await fetchCSV();
-  cache = {
-    loadedAt: nowMs(),
-    headers,
-    rows,
-  };
-  return cache;
+async function getWarscrollData(force = false) {
+  const now = Date.now();
+  if (!force && warscrollCache.rows.length && now - warscrollCache.at < CACHE_TTL_MS) {
+    return warscrollCache;
+  }
+  if (!WARSCR_CSV_URL) throw new Error("Missing SHEET_CSV_URL env var");
+  const fresh = await loadCSV(WARSCR_CSV_URL);
+  warscrollCache = { at: now, ...fresh };
+  return warscrollCache;
 }
 
-function isAdmin(interaction) {
-  if (!ADMIN_USER_IDS.length) return false;
-  return ADMIN_USER_IDS.includes(interaction.user.id);
+async function getFactionData(force = false) {
+  const now = Date.now();
+  if (!force && factionCache.rows.length && now - factionCache.at < CACHE_TTL_MS) {
+    return factionCache;
+  }
+  if (!FACTION_CSV_URL) throw new Error("Missing FACTION_CSV_URL env var");
+  const fresh = await loadCSV(FACTION_CSV_URL);
+  factionCache = { at: now, ...fresh };
+  return factionCache;
 }
 
-function headerIndex(headers, name) {
-  return headers.findIndex((h) => String(h).trim() === name);
-}
-
-function buildSourceFooter() {
-  const dt = new Date(cache.loadedAt || nowMs());
-  return `Source: Woehammer GT Database • Cached: ${dt.toLocaleString()}`;
-}
-
-/* -------------------- Data extraction -------------------- */
-
-function buildRowObject(headers, row) {
+/* =========================
+   Faction row helpers
+========================= */
+function rowToObj(headers, row) {
   return Object.fromEntries(headers.map((h, i) => [h, row[i]]));
 }
 
-function getGamesValue(rowObj) {
-  // Expect column name exactly as your sheet: "Faction Games Featured"
-  return parseNumber(rowObj["Faction Games Featured"]);
+function findFactionOverall(rowsObj, factionName) {
+  const q = normalise(factionName);
+  return rowsObj.find(r =>
+    normalise(r.Faction) === q && normalise(r["Battle Formation"]) === "overall"
+  );
 }
 
-function passesMinGames(rowObj) {
-  const g = getGamesValue(rowObj);
-  return Number.isFinite(g) && g >= MIN_GAMES;
+function findFactionFormation(rowsObj, factionName, formationName) {
+  const fq = normalise(factionName);
+  const bq = normalise(formationName);
+  return rowsObj.find(r =>
+    normalise(r.Faction) === fq && normalise(r["Battle Formation"]) === bq
+  );
 }
 
-function impactPP(rowObj) {
-  const win = parsePercent(rowObj["Win %"]);
-  const without = parsePercent(rowObj["Win % Without"]);
-  if (!Number.isFinite(win) || !Number.isFinite(without)) return NaN;
-  return win - without;
+function listFactionFormations(rowsObj, factionName) {
+  const fq = normalise(factionName);
+  return rowsObj
+    .filter(r => normalise(r.Faction) === fq)
+    .map(r => r["Battle Formation"])
+    .filter(Boolean);
 }
 
-/* -------------------- Embeds -------------------- */
+/* =========================
+   Blurb generator (simple + useful)
+========================= */
+function makeFactionBlurb(r) {
+  // Uses: Win %, Average Elo, Median Elo, Elo Gap, plus 5-0 etc if present
+  const win = parsePercent(r["Win %"]);
+  const avg = parseNumber(r["Average Elo"]);
+  const med = parseNumber(r["Median Elo"]);
+  const gap = parseNumber(r["Elo Gap"]); // already computed by you
+  const games = parseNumber(r["Games"]);
 
-function embedError(title, desc) {
-  return new EmbedBuilder().setTitle(title).setDescription(desc);
+  // consistency proxy: % 4 wins and % 5 wins if present
+  const p5 = parsePercent(r["Players Achieving 5 Wins"]);
+  const p4 = parsePercent(r["Players Achieving 4 wins"]); // note your header casing
+  const p1 = parsePercent(r["Players Achieving 1 Win"]);
+  const p0 = parsePercent(r["Players Without a Win"]);
+
+  const parts = [];
+
+  // Elo gap meaning (starting Elo is 400 — you can mention elsewhere globally)
+  if (gap != null) {
+    if (gap >= 40) parts.push("Results look specialist-driven (big Elo gap).");
+    else if (gap <= 15) parts.push("Performance looks broad-based (small Elo gap).");
+    else parts.push("Some top-end lift (moderate Elo gap).");
+  }
+
+  if (win != null) {
+    if (win >= 55) parts.push("Win rate is above average.");
+    else if (win <= 45) parts.push("Win rate is below average.");
+    else parts.push("Win rate is middling.");
+  }
+
+  if (p5 != null || p4 != null) {
+    const p5txt = p5 != null ? `${p5.toFixed(0)}% 5–0s` : null;
+    const p4txt = p4 != null ? `${p4.toFixed(0)}% 4–1s` : null;
+    const bit = [p5txt, p4txt].filter(Boolean).join(", ");
+    if (bit) parts.push(`Top-end finishes: ${bit}.`);
+  }
+
+  if (p0 != null || p1 != null) {
+    const p0txt = p0 != null ? `${p0.toFixed(0)}% 0–5` : null;
+    const p1txt = p1 != null ? `${p1.toFixed(0)}% 1–4` : null;
+    const bit = [p0txt, p1txt].filter(Boolean).join(", ");
+    if (bit) parts.push(`Lower-end finishes: ${bit}.`);
+  }
+
+  if (games != null) parts.unshift(`Based on ${games} games.`);
+
+  return parts.length ? parts.join(" ") : "Not enough data to generate a summary.";
 }
 
-function embedHelp() {
-  return new EmbedBuilder()
-    .setTitle("Woehammer Stats Bot — Commands")
-    .setDescription(`(Ignoring rows with < ${MIN_GAMES} games)`)
-    .addFields(
-      {
-        name: "/warscroll",
-        value:
-          "Search warscrolls (partial matches)\nExample: `/warscroll name: krethusa`",
-      },
-      {
-        name: "/compare",
-        value:
-          "Compare two warscrolls\nExample: `/compare a: krethusa b: scourge of ghyran krethusa`",
-      },
-      {
-        name: "/common",
-        value:
-          "Top 10 most used warscrolls (by Used %)\nExample: `/common faction: fyreslayers`",
-      },
-      {
-        name: "/leastcommon",
-        value:
-          "Bottom 10 least used warscrolls (by Used %)\nExample: `/leastcommon faction: stormcast`",
-      },
-      {
-        name: "/impact",
-        value:
-          "Biggest win-rate swings (Impact in pp)\nExample: `/impact faction: slaves to darkness`",
-      },
-      {
-        name: "/peek",
-        value: "Show detected sheet headers",
-      },
-      {
-        name: "/refresh (Admin only)",
-        value:
-          "Reload stats from Google Sheets\nExample: `/refresh`",
-      }
-    )
-    .addFields({
-      name: "Impact definition",
-      value:
-        "Impact = (Win %) − (Win % Without) shown as percentage points (pp).",
-    })
-    .setFooter({ text: buildSourceFooter() });
+/* =========================
+   Output formatting (Discord)
+========================= */
+function formatFactionRow(r, titlePrefix = "") {
+  const faction = r.Faction;
+  const formation = r["Battle Formation"];
+  const games = r["Games"];
+  const win = r["Win %"];
+  const avg = r["Average Elo"];
+  const med = r["Median Elo"];
+  const gap = r["Elo Gap"];
+  const share = r["Games Share"];
+
+  // keep it readable on mobile:
+  return (
+    `**${titlePrefix}${faction} — ${formation}**\n` +
+    `Games: ${games} (${share ?? "—"} share) | Win: ${win}\n` +
+    `Elo: Avg ${avg} | Median ${med} | Gap ${gap}\n` +
+    `5–0: ${r["Players Achieving 5 Wins"] ?? "—"} | 4–1: ${r["Players Achieving 4 wins"] ?? "—"} | 3–2: ${r["Players Achieving 3 Wins"] ?? "—"}\n` +
+    `2–3: ${r["Players Achieving 2 wins"] ?? "—"} | 1–4: ${r["Players Achieving 1 Win"] ?? "—"} | 0–5: ${r["Players Without a Win"] ?? "—"}`
+  );
 }
 
-function embedWarscrollResults(queryRaw, matches) {
-  const e = new EmbedBuilder()
-    .setTitle(`Warscroll results for: ${queryRaw}`)
-    .setFooter({ text: buildSourceFooter() });
-
-  // Keep it readable: warscroll bold, stats on next line
-  // Also stay within Discord embed limits (field values max 1024 chars)
-  const lines = matches.slice(0, 10).map((m, i) => {
-    const imp = impactPP(m);
-    const impText = Number.isFinite(imp) ? ` | Impact: ${imp > 0 ? "+" : ""}${imp.toFixed(0)}pp` : "";
-    return (
-      `${i + 1}. **${m.Warscroll}** (${m.Faction})\n` +
-      `Games: ${m["Faction Games Featured"]} | Win: ${m["Win %"]} | Used: ${m["Used %"]} of faction lists | Avg/list: ${m["Av Per List"]} | Win w/o: ${m["Win % Without"]}${impText}`
-    );
-  });
-
-  e.setDescription(lines.join("\n\n"));
-  return e;
-}
-
-function embedRankedList(title, subtitle, rows) {
-  const e = new EmbedBuilder()
-    .setTitle(title)
-    .setDescription(subtitle)
-    .setFooter({ text: buildSourceFooter() });
-
-  const lines = rows.slice(0, 10).map((r, i) => {
-    const imp = impactPP(r);
-    const impText = Number.isFinite(imp) ? ` | Impact: ${imp > 0 ? "+" : ""}${imp.toFixed(0)}pp` : "";
-    return (
-      `${i + 1}. **${r.Warscroll}**\n` +
-      `Used: ${r["Used %"]} | Games: ${r["Faction Games Featured"]} | Win: ${r["Win %"]}${impText}`
-    );
-  });
-
-  e.addFields({ name: "Results", value: lines.join("\n\n") });
-  return e;
-}
-
-function embedImpactList(faction, rows) {
-  const e = new EmbedBuilder()
-    .setTitle(`Top 10 warscrolls by win-rate impact — ${faction}`)
-    .setDescription("Impact = (Win %) − (Win % Without) in percentage points (pp)")
-    .setFooter({ text: buildSourceFooter() });
-
-  const lines = rows.slice(0, 10).map((r, i) => {
-    const imp = impactPP(r);
-    const impText = Number.isFinite(imp) ? `${imp > 0 ? "+" : ""}${imp.toFixed(0)}pp` : "n/a";
-    return (
-      `${i + 1}. **${r.Warscroll}**\n` +
-      `Impact: ${impText} | Used: ${r["Used %"]} | Games: ${r["Faction Games Featured"]} | Win: ${r["Win %"]} | Win w/o: ${r["Win % Without"]}`
-    );
-  });
-
-  e.addFields({ name: "Results", value: lines.join("\n\n") });
-  return e;
-}
-
-function embedCompare(aObj, bObj) {
-  const aImp = impactPP(aObj);
-  const bImp = impactPP(bObj);
-
-  const e = new EmbedBuilder()
-    .setTitle("Warscroll compare")
-    .setFooter({ text: buildSourceFooter() })
-    .addFields(
-      {
-        name: `A — ${aObj.Warscroll}`,
-        value:
-          `Faction: ${aObj.Faction}\n` +
-          `Games: ${aObj["Faction Games Featured"]}\n` +
-          `Win %: ${aObj["Win %"]}\n` +
-          `Used %: ${aObj["Used %"]} of faction lists\n` +
-          `Avg/list: ${aObj["Av Per List"]}\n` +
-          `Win % without: ${aObj["Win % Without"]}\n` +
-          `Impact: ${Number.isFinite(aImp) ? `${aImp > 0 ? "+" : ""}${aImp.toFixed(0)}pp` : "n/a"}`,
-        inline: true,
-      },
-      {
-        name: `B — ${bObj.Warscroll}`,
-        value:
-          `Faction: ${bObj.Faction}\n` +
-          `Games: ${bObj["Faction Games Featured"]}\n` +
-          `Win %: ${bObj["Win %"]}\n` +
-          `Used %: ${bObj["Used %"]} of faction lists\n` +
-          `Avg/list: ${bObj["Av Per List"]}\n` +
-          `Win % without: ${bObj["Win % Without"]}\n` +
-          `Impact: ${Number.isFinite(bImp) ? `${bImp > 0 ? "+" : ""}${bImp.toFixed(0)}pp` : "n/a"}`,
-        inline: true,
-      }
-    );
-
-  return e;
-}
-
-/* -------------------- Commands registration -------------------- */
-
+/* =========================
+   Slash commands
+========================= */
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
   const commands = [
-    new SlashCommandBuilder().setName("help").setDescription("Show bot commands"),
-    new SlashCommandBuilder().setName("peek").setDescription("Show detected sheet headers"),
+    // help
+    new SlashCommandBuilder()
+      .setName("help")
+      .setDescription("Show bot commands"),
 
+    // refresh (admin only)
     new SlashCommandBuilder()
       .setName("refresh")
-      .setDescription("Admin only: refresh cached Google Sheets data"),
+      .setDescription("Admin only: refresh cached CSV data")
+      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+    // warscroll search
     new SlashCommandBuilder()
       .setName("warscroll")
-      .setDescription("Search warscroll stats (partial matches)")
-      .addStringOption((o) =>
-        o.setName("name").setDescription("Warscroll name (partial ok)").setRequired(true)
+      .setDescription("Search warscrolls (partial matches)")
+      .addStringOption(o =>
+        o.setName("name").setDescription("Warscroll name").setRequired(true)
       ),
 
-    new SlashCommandBuilder()
-      .setName("common")
-      .setDescription("Top 10 most common warscrolls for a faction (by Used %)")
-      .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
-      ),
-
-    new SlashCommandBuilder()
-      .setName("leastcommon")
-      .setDescription("Bottom 10 least common warscrolls for a faction (by Used %)")
-      .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
-      ),
-
-    new SlashCommandBuilder()
-      .setName("impact")
-      .setDescription("Top 10 biggest win-rate impacts for a faction (pp)")
-      .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
-      ),
-
+    // compare two warscroll queries
     new SlashCommandBuilder()
       .setName("compare")
-      .setDescription("Compare two warscrolls")
-      .addStringOption((o) =>
-        o.setName("a").setDescription("Warscroll A").setRequired(true)
-      )
-      .addStringOption((o) =>
-        o.setName("b").setDescription("Warscroll B").setRequired(true)
-      ),
-  ].map((c) => c.toJSON());
+      .setDescription("Compare two warscroll searches")
+      .addStringOption(o => o.setName("a").setDescription("First warscroll query").setRequired(true))
+      .addStringOption(o => o.setName("b").setDescription("Second warscroll query").setRequired(true)),
+
+    // top 10 common warscrolls for a faction
+    new SlashCommandBuilder()
+      .setName("common")
+      .setDescription("Top 10 most used warscrolls (by Used %) for a faction")
+      .addStringOption(o => o.setName("faction").setDescription("Faction").setRequired(true)),
+
+    // bottom 10 least common warscrolls
+    new SlashCommandBuilder()
+      .setName("leastcommon")
+      .setDescription("Bottom 10 least used warscrolls (by Used %) for a faction")
+      .addStringOption(o => o.setName("faction").setDescription("Faction").setRequired(true)),
+
+    // impact (win% - win% without) largest swings
+    new SlashCommandBuilder()
+      .setName("impact")
+      .setDescription("Top 10 biggest win-rate swings (Impact in pp) for a faction")
+      .addStringOption(o => o.setName("faction").setDescription("Faction").setRequired(true)),
+
+    // NEW: faction overall
+    new SlashCommandBuilder()
+      .setName("faction")
+      .setDescription("Show faction Overall stats + blurb")
+      .addStringOption(o => o.setName("name").setDescription("Faction name").setRequired(true)),
+
+    // NEW: formation line
+    new SlashCommandBuilder()
+      .setName("formation")
+      .setDescription("Show stats for a specific formation within a faction")
+      .addStringOption(o => o.setName("faction").setDescription("Faction name").setRequired(true))
+      .addStringOption(o => o.setName("name").setDescription("Formation name").setRequired(true)),
+
+    // NEW: compare factions
+    new SlashCommandBuilder()
+      .setName("fcompare")
+      .setDescription("Compare two factions (Overall vs Overall)")
+      .addStringOption(o => o.setName("a").setDescription("Faction A").setRequired(true))
+      .addStringOption(o => o.setName("b").setDescription("Faction B").setRequired(true)),
+  ].map(c => c.toJSON());
 
   await client.application.commands.set(commands);
-
-  // Warm cache on startup (fast first command)
-  try {
-    await ensureCacheLoaded(true);
-    console.log("CSV cache loaded.");
-  } catch (e) {
-    console.warn("CSV cache load failed on startup:", e?.message || e);
-  }
-
-  // Optional auto-refresh timer
-  if (AUTO_REFRESH_HOURS > 0) {
-    setInterval(async () => {
-      try {
-        await ensureCacheLoaded(true);
-        console.log("Auto-refreshed CSV cache.");
-      } catch (e) {
-        console.warn("Auto-refresh failed:", e?.message || e);
-      }
-    }, AUTO_REFRESH_HOURS * 60 * 60 * 1000);
-  }
 });
 
-/* -------------------- Interaction Handler -------------------- */
-
-client.on("interactionCreate", async (interaction) => {
+/* =========================
+   Interaction handler
+========================= */
+client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  // Avoid 40060 errors: only acknowledge once.
-  // Defer for anything that fetches/filters data.
-  const cmd = interaction.commandName;
-
-  const shouldDefer = ["peek", "refresh", "warscroll", "common", "leastcommon", "impact", "compare"].includes(cmd);
-  if (shouldDefer) await interaction.deferReply({ ephemeral: false });
+  // Always defer once per interaction
+  await interaction.deferReply();
 
   try {
-    // /help is instant and doesn’t need data
+    const cmd = interaction.commandName;
+
     if (cmd === "help") {
-      return interaction.reply({ embeds: [embedHelp()], ephemeral: false });
-    }
-
-    // Ensure cache
-    await ensureCacheLoaded(false);
-    const { headers, rows } = cache;
-
-    if (cmd === "peek") {
-      const e = new EmbedBuilder()
-        .setTitle("Headers I see")
-        .setDescription(headers.map((h) => `• ${h}`).join("\n"))
-        .setFooter({ text: buildSourceFooter() });
-
-      return interaction.editReply({ embeds: [e] });
+      return interaction.editReply(
+        `**Woehammer Stats Bot — Commands**\n` +
+          `_(Ignoring rows with < 5 games)_\n\n` +
+          `• **/warscroll** name: Search warscrolls (partial matches)\n` +
+          `• **/compare** a + b: Compare two warscroll searches\n` +
+          `• **/common** faction: Top 10 most used warscrolls (Used %)\n` +
+          `• **/leastcommon** faction: Bottom 10 least used warscrolls (Used %)\n` +
+          `• **/impact** faction: Biggest win-rate swings (pp)\n\n` +
+          `• **/faction** name: Overall stats + bot blurb\n` +
+          `• **/formation** faction + name: Single formation line\n` +
+          `• **/fcompare** a + b: Compare two factions (Overall)\n\n` +
+          `Source: **Woehammer GT Database**`
+      );
     }
 
     if (cmd === "refresh") {
-      if (!isAdmin(interaction)) {
-        return interaction.editReply({
-          embeds: [embedError("❌ Not allowed", "This command is admin-only.")],
+      // Discord already gates by admin perms, but we’ll be extra safe:
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+        return interaction.editReply("❌ Admin only.");
+      }
+      await getWarscrollData(true);
+      await getFactionData(true);
+      return interaction.editReply("✅ Refreshed cached data.");
+    }
+
+    /* ---------- Warscroll sheet commands ---------- */
+    if (["warscroll", "compare", "common", "leastcommon", "impact"].includes(cmd)) {
+      const { headers, rows } = await getWarscrollData(false);
+
+      const idxWarscroll = headers.indexOf("Warscroll");
+      if (idxWarscroll === -1) return interaction.editReply("❌ No `Warscroll` column found.");
+
+      const rowsObj = rows.map(r => rowToObj(headers, r));
+
+      const MIN_GAMES = 5;
+
+      if (cmd === "warscroll") {
+        const qRaw = interaction.options.getString("name");
+        const q = normalise(qRaw);
+
+        const matches = rowsObj
+          .filter(r => hasMinGames(r, MIN_GAMES))
+          .filter(r => normalise(r["Warscroll"]).includes(q));
+
+        if (!matches.length) {
+          return interaction.editReply(`No matches for "${qRaw}".`);
+        }
+
+        // show all matches (but keep it reasonable)
+        const top = matches.slice(0, 5);
+
+        const lines = top.map(r => {
+          const impact =
+            parsePercent(r["Win %"]) != null && parsePercent(r["Win % Without"]) != null
+              ? (parsePercent(r["Win %"]) - parsePercent(r["Win % Without"]))
+              : null;
+
+          const impactTxt = impact == null ? "" : ` | Impact: ${impact >= 0 ? "+" : ""}${impact.toFixed(0)}pp`;
+
+          return (
+            `**${r.Warscroll}** (${r.Faction})\n` +
+            `Games: ${r["Faction Games Featured"]} | Win: ${r["Win %"]} | Used: ${r["Used %"]} of faction lists | Avg/list: ${r["Av Per List"]} | Win w/o: ${r["Win % Without"]}${impactTxt}`
+          );
         });
-      }
 
-      await ensureCacheLoaded(true);
-      const dt = new Date(cache.loadedAt);
-      return interaction.editReply(
-        `✅ Refreshed data cache.\nCached at: **${dt.toLocaleString()}**`
-      );
-    }
-
-    // Column checks (fail fast if sheet changes)
-    const required = [
-      "Faction",
-      "Warscroll",
-      "Faction Games Featured",
-      "Win %",
-      "Used %",
-      "Av Per List",
-      "Faction Games Excluded",
-      "Win % Without",
-    ];
-    const missing = required.filter((h) => headerIndex(headers, h) === -1);
-    if (missing.length) {
-      return interaction.editReply(
-        `❌ Sheet is missing columns:\n• ${missing.join("\n• ")}`
-      );
-    }
-
-    // Convert all rows to objects (once per request)
-    // Filter by min games to keep results sane
-    const rowObjs = rows
-      .map((r) => buildRowObject(headers, r))
-      .filter((o) => passesMinGames(o));
-
-    if (cmd === "warscroll") {
-      const raw = interaction.options.getString("name");
-      const query = normalise(raw);
-
-      const matches = rowObjs
-        .filter((o) => normalise(o.Warscroll).includes(query))
-        .slice(0, 10);
-
-      if (!matches.length) {
-        return interaction.editReply(`No matches for "${raw}".`);
-      }
-
-      return interaction.editReply({ embeds: [embedWarscrollResults(raw, matches)] });
-    }
-
-    if (cmd === "common" || cmd === "leastcommon") {
-      const rawFaction = interaction.options.getString("faction");
-      const qFaction = normalise(rawFaction);
-
-      const factionRows = rowObjs.filter((o) => normalise(o.Faction).includes(qFaction));
-      if (!factionRows.length) {
-        return interaction.editReply(`No rows found for faction "${rawFaction}".`);
-      }
-
-      // Sort by Used % numeric
-      const sorted = factionRows
-        .map((o) => ({ ...o, __used: parsePercent(o["Used %"]) }))
-        .filter((o) => Number.isFinite(o.__used))
-        .sort((a, b) => b.__used - a.__used);
-
-      const list = cmd === "leastcommon" ? [...sorted].reverse() : sorted;
-
-      const title =
-        cmd === "leastcommon"
-          ? `Bottom 10 least common warscrolls — ${rawFaction}`
-          : `Top 10 most common warscrolls — ${rawFaction}`;
-
-      const subtitle =
-        cmd === "leastcommon"
-          ? "Least common = lowest Used %"
-          : "Most common = highest Used %";
-
-      return interaction.editReply({
-        embeds: [embedRankedList(title, subtitle, list)],
-      });
-    }
-
-    if (cmd === "impact") {
-      const rawFaction = interaction.options.getString("faction");
-      const qFaction = normalise(rawFaction);
-
-      const factionRows = rowObjs.filter((o) => normalise(o.Faction).includes(qFaction));
-      if (!factionRows.length) {
-        return interaction.editReply(`No rows found for faction "${rawFaction}".`);
-      }
-
-      const withImpact = factionRows
-        .map((o) => ({ ...o, __impact: impactPP(o) }))
-        .filter((o) => Number.isFinite(o.__impact))
-        // Sort by absolute swing (biggest magnitude)
-        .sort((a, b) => Math.abs(b.__impact) - Math.abs(a.__impact));
-
-      return interaction.editReply({
-        embeds: [embedImpactList(rawFaction, withImpact)],
-      });
-    }
-
-    if (cmd === "compare") {
-      const rawA = interaction.options.getString("a");
-      const rawB = interaction.options.getString("b");
-      const qA = normalise(rawA);
-      const qB = normalise(rawB);
-
-      const findBest = (q) => {
-        const exact = rowObjs.find((o) => normalise(o.Warscroll) === q);
-        if (exact) return exact;
-        return rowObjs.find((o) => normalise(o.Warscroll).includes(q)) || null;
-      };
-
-      const aObj = findBest(qA);
-      const bObj = findBest(qB);
-
-      if (!aObj || !bObj) {
         return interaction.editReply(
-          `Couldn’t find both warscrolls.\nA: ${aObj ? "✅" : "❌"} (${rawA})\nB: ${bObj ? "✅" : "❌"} (${rawB})`
+          `**Warscroll results for:** ${qRaw}\n\n` +
+            lines.join("\n\n") +
+            `\n\nSource: **Woehammer GT Database**`
         );
       }
 
-      return interaction.editReply({ embeds: [embedCompare(aObj, bObj)] });
+      if (cmd === "compare") {
+        const aRaw = interaction.options.getString("a");
+        const bRaw = interaction.options.getString("b");
+        const a = normalise(aRaw);
+        const b = normalise(bRaw);
+
+        const aMatch = rowsObj.find(r => hasMinGames(r, MIN_GAMES) && normalise(r["Warscroll"]).includes(a));
+        const bMatch = rowsObj.find(r => hasMinGames(r, MIN_GAMES) && normalise(r["Warscroll"]).includes(b));
+
+        if (!aMatch || !bMatch) {
+          return interaction.editReply(
+            `Couldn't find both entries (need ≥ ${MIN_GAMES} games).\n` +
+              `A: ${aMatch ? "✅" : "❌"} "${aRaw}"\n` +
+              `B: ${bMatch ? "✅" : "❌"} "${bRaw}"`
+          );
+        }
+
+        const fmt = r => {
+          const impact =
+            parsePercent(r["Win %"]) != null && parsePercent(r["Win % Without"]) != null
+              ? (parsePercent(r["Win %"]) - parsePercent(r["Win % Without"]))
+              : null;
+          return (
+            `**${r.Warscroll}** (${r.Faction})\n` +
+            `Games: ${r["Faction Games Featured"]} | Win: ${r["Win %"]} | Used: ${r["Used %"]} of faction lists\n` +
+            `Avg/list: ${r["Av Per List"]} | Win w/o: ${r["Win % Without"]}` +
+            (impact == null ? "" : ` | Impact: ${impact >= 0 ? "+" : ""}${impact.toFixed(0)}pp`)
+          );
+        };
+
+        return interaction.editReply(
+          `**Warscroll compare**\n\n${fmt(aMatch)}\n\n${fmt(bMatch)}\n\nSource: **Woehammer GT Database**`
+        );
+      }
+
+      // faction filter for warscroll commands
+      const factionRaw = interaction.options.getString("faction");
+      const fq = normalise(factionRaw);
+
+      const pool = rowsObj
+        .filter(r => hasMinGames(r, MIN_GAMES))
+        .filter(r => normalise(r["Faction"]) === fq);
+
+      if (!pool.length) {
+        return interaction.editReply(`No warscroll rows found for "${factionRaw}" (≥ ${MIN_GAMES} games).`);
+      }
+
+      if (cmd === "common" || cmd === "leastcommon") {
+        const sorted = [...pool].sort((a, b) => (parsePercent(b["Used %"]) ?? -999) - (parsePercent(a["Used %"]) ?? -999));
+        const list = cmd === "common" ? sorted.slice(0, 10) : sorted.slice(-10).reverse();
+
+        const title = cmd === "common"
+          ? `**Top 10 most common warscrolls — ${pool[0].Faction}**`
+          : `**Bottom 10 least common warscrolls — ${pool[0].Faction}**`;
+
+        const subtitle = cmd === "common"
+          ? `Most common = highest Used %`
+          : `Least common = lowest Used %`;
+
+        const lines = list.map((r, i) => {
+          return (
+            `${i + 1}. **${r.Warscroll}**\n` +
+            `Used: ${r["Used %"]} | Games: ${r["Faction Games Featured"]} | Win: ${r["Win %"]}`
+          );
+        });
+
+        return interaction.editReply(
+          `${title}\n${subtitle}\n\n` +
+            lines.join("\n\n") +
+            `\n\nSource: **Woehammer GT Database**`
+        );
+      }
+
+      if (cmd === "impact") {
+        // impact = win - winWithout (pp)
+        const withImpact = pool
+          .map(r => {
+            const w = parsePercent(r["Win %"]);
+            const wo = parsePercent(r["Win % Without"]);
+            if (w == null || wo == null) return null;
+            return { r, impact: w - wo };
+          })
+          .filter(Boolean);
+
+        if (!withImpact.length) {
+          return interaction.editReply(`No impact data available for "${pool[0].Faction}".`);
+        }
+
+        withImpact.sort((a, b) => Math.abs(b.impact) - Math.abs(a.impact));
+        const top = withImpact.slice(0, 10);
+
+        const lines = top.map((x, i) => {
+          const sign = x.impact >= 0 ? "+" : "";
+          return (
+            `${i + 1}. **${x.r.Warscroll}**\n` +
+            `Impact: ${sign}${x.impact.toFixed(0)}pp | Win: ${x.r["Win %"]} | Win w/o: ${x.r["Win % Without"]} | Games: ${x.r["Faction Games Featured"]}`
+          );
+        });
+
+        return interaction.editReply(
+          `**Top 10 warscrolls with biggest win-rate impact — ${pool[0].Faction}**\n` +
+            `Impact = (Win %) - (Win % Without) shown as percentage points (pp).\n\n` +
+            lines.join("\n\n") +
+            `\n\nSource: **Woehammer GT Database**`
+        );
+      }
     }
 
-    // fallback
-    return interaction.editReply("❌ Unknown command.");
+    /* ---------- NEW: Faction sheet commands ---------- */
+    if (["faction", "formation", "fcompare"].includes(interaction.commandName)) {
+      const { headers, rows } = await getFactionData(false);
+      const rowsObj = rows.map(r => rowToObj(headers, r));
 
+      const MIN_GAMES = 5;
+
+      if (interaction.commandName === "faction") {
+        const nameRaw = interaction.options.getString("name");
+        const overall = findFactionOverall(rowsObj, nameRaw);
+
+        if (!overall) {
+          const candidates = rowsObj
+            .filter(r => normalise(r["Battle Formation"]) === "overall")
+            .map(r => r.Faction);
+
+          return interaction.editReply(
+            `Couldn't find an Overall row for "${nameRaw}".\n` +
+              `Try the exact faction name (e.g. "Slaves to Darkness").`
+          );
+        }
+
+        if (!hasMinGames(overall, MIN_GAMES)) {
+          return interaction.editReply(`Not enough data for "${overall.Faction}" (need ≥ ${MIN_GAMES} games).`);
+        }
+
+        const blurb = makeFactionBlurb(overall);
+
+        return interaction.editReply(
+          formatFactionRow(overall) +
+            `\n\n**Bot summary**\n${blurb}\n\nSource: **Woehammer GT Database**`
+        );
+      }
+
+      if (interaction.commandName === "formation") {
+        const factionRaw = interaction.options.getString("faction");
+        const formRaw = interaction.options.getString("name");
+        const row = findFactionFormation(rowsObj, factionRaw, formRaw);
+
+        if (!row) {
+          const forms = listFactionFormations(rowsObj, factionRaw).slice(0, 20);
+          return interaction.editReply(
+            `Couldn't find "${formRaw}" for "${factionRaw}".\n` +
+              (forms.length ? `Available (sample): ${forms.join(", ")}` : "")
+          );
+        }
+
+        if (!hasMinGames(row, MIN_GAMES)) {
+          return interaction.editReply(`Not enough data for that line (need ≥ ${MIN_GAMES} games).`);
+        }
+
+        const blurb = makeFactionBlurb(row);
+
+        return interaction.editReply(
+          formatFactionRow(row) +
+            `\n\n**Bot summary**\n${blurb}\n\nSource: **Woehammer GT Database**`
+        );
+      }
+
+      if (interaction.commandName === "fcompare") {
+        const aRaw = interaction.options.getString("a");
+        const bRaw = interaction.options.getString("b");
+
+        const a = findFactionOverall(rowsObj, aRaw);
+        const b = findFactionOverall(rowsObj, bRaw);
+
+        if (!a || !b) {
+          return interaction.editReply(
+            `Couldn't find both Overall rows.\n` +
+              `A: ${a ? "✅" : "❌"} "${aRaw}"\n` +
+              `B: ${b ? "✅" : "❌"} "${bRaw}"`
+          );
+        }
+
+        if (!hasMinGames(a, MIN_GAMES) || !hasMinGames(b, MIN_GAMES)) {
+          return interaction.editReply(`Need ≥ ${MIN_GAMES} games on both factions to compare.`);
+        }
+
+        // quick “who leads” line
+        const aWin = parsePercent(a["Win %"]);
+        const bWin = parsePercent(b["Win %"]);
+        const aGap = parseNumber(a["Elo Gap"]);
+        const bGap = parseNumber(b["Elo Gap"]);
+
+        const leadBits = [];
+        if (aWin != null && bWin != null) {
+          const lead = aWin === bWin ? "Even win rate" : (aWin > bWin ? `${a.Faction} leads win rate` : `${b.Faction} leads win rate`);
+          leadBits.push(`${lead} (${a["Win %"]} vs ${b["Win %"]}).`);
+        }
+        if (aGap != null && bGap != null) {
+          const lead = aGap === bGap ? "Even Elo gap" : (aGap > bGap ? `${a.Faction} more specialist-driven` : `${b.Faction} more specialist-driven`);
+          leadBits.push(`${lead} (gap ${a["Elo Gap"]} vs ${b["Elo Gap"]}).`);
+        }
+
+        return interaction.editReply(
+          `**Faction compare (Overall)**\n\n` +
+            `${formatFactionRow(a)}\n\n` +
+            `${formatFactionRow(b)}\n\n` +
+            (leadBits.length ? `**Read:** ${leadBits.join(" ")}\n\n` : "") +
+            `Source: **Woehammer GT Database**`
+        );
+      }
+    }
+
+    return interaction.editReply("❌ Unknown command (try /help).");
   } catch (err) {
     console.error(err);
-    // If the interaction was deferred, we must editReply. If not, reply.
-    try {
-      if (interaction.deferred || interaction.replied) {
-        return interaction.editReply("❌ Internal error (check logs).");
-      }
-      return interaction.reply("❌ Internal error (check logs).");
-    } catch {
-      // swallow
-    }
+    // If something went wrong after defer, always editReply (not reply)
+    return interaction.editReply("❌ Internal error (check logs).");
   }
 });
 
-/* -------------------- Login -------------------- */
-
-if (!DISCORD_TOKEN) throw new Error("Missing DISCORD_TOKEN env var");
-client.login(DISCORD_TOKEN);
+/* =========================
+   Login
+========================= */
+client.login(process.env.DISCORD_TOKEN);
