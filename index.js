@@ -1,412 +1,402 @@
-// index.js
-import {
-  Client,
-  GatewayIntentBits,
-  SlashCommandBuilder,
-  EmbedBuilder,
-} from "discord.js";
-import http from "http";
+import { Client, GatewayIntentBits, SlashCommandBuilder } from "discord.js";
 
-/* -------------------- Keep Replit Deploy alive (opens a port) -------------------- */
-const PORT = process.env.PORT || 8000;
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("OK");
-  })
-  .listen(PORT, "0.0.0.0", () => console.log(`🌐 Web server listening on :${PORT}`));
+/**
+ * REQUIRED ENV VARS (Railway -> Variables)
+ * - DISCORD_TOKEN
+ * - SHEET_CSV_URL
+ */
 
-/* -------------------- Discord client -------------------- */
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const CSV_URL = process.env.SHEET_CSV_URL;
 if (!CSV_URL) throw new Error("Missing SHEET_CSV_URL env var");
 if (!process.env.DISCORD_TOKEN) throw new Error("Missing DISCORD_TOKEN env var");
 
-/* -------------------- Crash visibility (don’t die silently) -------------------- */
-process.on("unhandledRejection", (e) => console.error("unhandledRejection:", e));
-process.on("uncaughtException", (e) => console.error("uncaughtException:", e));
+// ---- Settings you can tweak ----
+const MIN_GAMES = 5;                      // ignore rows with fewer than this many games
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000;  // 6 hours cache
+const MAX_LIST_RESULTS = 10;              // top/bottom list size
+// --------------------------------
 
-/* -------------------- Cache (sheet updates weekly, so cache hard) -------------------- */
-let CACHE = { at: 0, headers: null, rows: null };
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+/* ---------------- Cache ---------------- */
+let cache = {
+  at: 0,
+  headers: null,
+  rows: null
+};
 
-/* -------------------- Helpers -------------------- */
-function normalise(str = "") {
-  return String(str)
+async function loadCSVCached(force = false) {
+  const now = Date.now();
+  if (!force && cache.rows && (now - cache.at) < CACHE_TTL_MS) {
+    return { headers: cache.headers, rows: cache.rows, cached: true };
+  }
+
+  const res = await fetch(CSV_URL);
+  if (!res.ok) throw new Error(`Failed to fetch CSV: ${res.status} ${res.statusText}`);
+  const text = await res.text();
+
+  const rows = text
+    .split("\n")
+    .map(r => r.trim())
+    .filter(Boolean)
+    .map(r => r.split(",").map(c => c.replace(/^"|"$/g, "").trim()))
+    .filter(r => r.length > 1);
+
+  const headers = rows.shift();
+  cache = { at: now, headers, rows };
+
+  return { headers, rows, cached: false };
+}
+
+/* ---------------- Helpers ---------------- */
+function normalise(str) {
+  return (str || "")
     .toLowerCase()
-    .replace(/\u00a0/g, " ")
-    .replace(/^the\s+/i, "")
-    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/^the\s+/i, "") // ignore leading "The"
+    .replace(/[^a-z0-9 ]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function asNumber(v) {
-  if (v == null) return null;
-  const s = String(v).trim().replace("%", "");
-  if (!s) return null;
+function asNumber(val) {
+  if (val === null || val === undefined) return 0;
+  const s = String(val).replace("%", "").trim();
   const n = Number(s);
-  return Number.isFinite(n) ? n : null;
+  return Number.isFinite(n) ? n : 0;
 }
 
-function fmtPct(v) {
-  const s = String(v ?? "").trim();
-  if (!s) return "—";
-  return s.includes("%") ? s : `${s}%`;
+function getIdx(headers, name) {
+  const idx = headers.indexOf(name);
+  if (idx === -1) throw new Error(`Missing required column: ${name}`);
+  return idx;
 }
 
-function ppDiff(winPct, winWithoutPct) {
-  const a = asNumber(winPct);
-  const b = asNumber(winWithoutPct);
-  if (a == null || b == null) return "—";
-  const d = a - b;
-  const sign = d >= 0 ? "+" : "";
-  return `${sign}${Math.round(d)}pp`;
-}
-
-// CSV parser that respects quotes (so commas inside cells won’t explode you)
-function parseCSV(text) {
-  const rows = [];
-  let row = [];
-  let cur = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    const next = text[i + 1];
-
-    if (ch === '"' && inQuotes && next === '"') {
-      cur += '"';
-      i++;
-      continue;
-    }
-    if (ch === '"') {
-      inQuotes = !inQuotes;
-      continue;
-    }
-    if (ch === "," && !inQuotes) {
-      row.push(cur);
-      cur = "";
-      continue;
-    }
-    if ((ch === "\n" || ch === "\r") && !inQuotes) {
-      if (ch === "\r" && next === "\n") i++;
-      row.push(cur);
-      cur = "";
-      if (row.some((c) => String(c).trim() !== "")) rows.push(row.map((c) => String(c).trim()));
-      row = [];
-      continue;
-    }
-    cur += ch;
-  }
-
-  row.push(cur);
-  if (row.some((c) => String(c).trim() !== "")) rows.push(row.map((c) => String(c).trim()));
-  return rows;
-}
-
-async function loadCSV(force = false) {
-  const now = Date.now();
-  if (!force && CACHE.headers && CACHE.rows && now - CACHE.at < CACHE_TTL_MS) {
-    return { headers: CACHE.headers, rows: CACHE.rows, cached: true };
-  }
-
-  const res = await fetch(CSV_URL, { cache: "no-store" });
-  if (!res.ok) throw new Error(`CSV fetch failed: ${res.status}`);
-
-  const text = await res.text();
-  const parsed = parseCSV(text);
-  const headers = parsed.shift() || [];
-  const rows = parsed;
-
-  CACHE = { at: now, headers, rows };
-  return { headers, rows, cached: false };
-}
-
-function idx(headers, name) {
-  return headers.indexOf(name);
-}
-
-function rowToObj(headers, row) {
+function pickRowData(headers, row) {
   return Object.fromEntries(headers.map((h, i) => [h, row[i]]));
 }
 
-function pickFactionRows(allRows, factionQuery) {
-  const fq = normalise(factionQuery);
-  // exact normalised match preferred
-  let exact = allRows.filter((d) => normalise(d.Faction) === fq);
-  if (exact.length) return { rows: exact, chosen: exact[0].Faction };
-
-  // partial fallback
-  const partial = allRows.filter((d) => normalise(d.Faction).includes(fq));
-  if (!partial.length) return { rows: [], chosen: null };
-
-  // choose most common exact string among partial matches
-  const counts = new Map();
-  for (const d of partial) counts.set(d.Faction, (counts.get(d.Faction) || 0) + 1);
-  const chosen = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
-  return { rows: partial.filter((d) => d.Faction === chosen), chosen };
+function impactPP(winWith, winWithout) {
+  const diff = asNumber(winWith) - asNumber(winWithout);
+  const sign = diff > 0 ? "+" : "";
+  return `${sign}${diff.toFixed(0)}pp`;
 }
 
-function safeFieldValue(text) {
-  // Discord field value limit is 1024 chars
-  if (text.length <= 1024) return text;
-  return text.slice(0, 1010) + "\n…(trimmed)";
+function formatWarscrollLine(d) {
+  const games = asNumber(d["Faction Games Featured"]);
+  const win = d["Win %"];
+  const used = d["Used %"];
+  const avg = d["Av Per List"];
+  const wout = d["Win % Without"];
+  const imp = impactPP(win, wout);
+
+  return (
+    `**${d.Warscroll}**\n` +
+    `Used: ${used} of faction lists | Games: ${games} | Win: ${win} | Avg/list: ${avg} | Win w/o: ${wout} | Impact: ${imp}`
+  );
 }
 
-function makeEmbed(title, description, fields) {
-  const embed = new EmbedBuilder().setTitle(title).setDescription(description);
-  if (fields?.length) {
-    embed.addFields(fields.map((f) => ({ ...f, value: safeFieldValue(f.value) })));
+function factionMatch(rowFaction, queryFaction) {
+  const f = normalise(rowFaction);
+  const q = normalise(queryFaction);
+  return f.includes(q) || q.includes(f);
+}
+
+function safeChunk(text, max = 1900) {
+  if (text.length <= max) return [text];
+  const parts = [];
+  let remaining = text;
+
+  while (remaining.length > max) {
+    let cut = remaining.lastIndexOf("\n", max);
+    if (cut < 500) cut = max;
+    parts.push(remaining.slice(0, cut));
+    remaining = remaining.slice(cut).trimStart();
   }
-  embed.setFooter({ text: "Source: Google Sheets (CSV)" });
-  return embed;
+  if (remaining.length) parts.push(remaining);
+  return parts;
 }
 
-/* -------------------- Command registration -------------------- */
-client.once("clientReady", async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+/* ---------------- Commands ---------------- */
+const commands = [
+  new SlashCommandBuilder()
+    .setName("help")
+    .setDescription("Show available commands and examples"),
 
-  const commands = [
-    new SlashCommandBuilder().setName("peek").setDescription("Show detected sheet headers"),
-    new SlashCommandBuilder().setName("refresh").setDescription("Refresh cached CSV now"),
+  new SlashCommandBuilder()
+    .setName("warscroll")
+    .setDescription("Search warscroll stats (partial matches allowed)")
+    .addStringOption(o =>
+      o.setName("name")
+        .setDescription("Warscroll name (partial OK, e.g. 'krethusa')")
+        .setRequired(true)
+    ),
 
-    new SlashCommandBuilder()
-      .setName("warscroll")
-      .setDescription("Search warscroll stats (partial matches supported)")
-      .addStringOption((o) =>
-        o.setName("name").setDescription("Warscroll name (partial ok)").setRequired(true)
-      ),
+  new SlashCommandBuilder()
+    .setName("compare")
+    .setDescription("Compare two warscrolls (first match for each query)")
+    .addStringOption(o =>
+      o.setName("a")
+        .setDescription("Warscroll A (partial OK)")
+        .setRequired(true)
+    )
+    .addStringOption(o =>
+      o.setName("b")
+        .setDescription("Warscroll B (partial OK)")
+        .setRequired(true)
+    ),
 
-    // aliases: /common and /top10 do the same thing
-    new SlashCommandBuilder()
-      .setName("common")
-      .setDescription("Top 10 most common warscrolls in a faction (by Used %)")
-      .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
-      ),
-    new SlashCommandBuilder()
-      .setName("top10")
-      .setDescription("Alias of /common")
-      .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
-      ),
+  new SlashCommandBuilder()
+    .setName("common")
+    .setDescription("Top 10 most common warscrolls for a faction (by Used %)")
+    .addStringOption(o =>
+      o.setName("faction")
+        .setDescription("Faction name, e.g. 'Fyreslayers'")
+        .setRequired(true)
+    ),
 
-    // aliases: /leastcommon and /least10 do the same thing
-    new SlashCommandBuilder()
-      .setName("leastcommon")
-      .setDescription("Bottom 10 least common warscrolls in a faction (by Used %)")
-      .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
-      ),
-    new SlashCommandBuilder()
-      .setName("least10")
-      .setDescription("Alias of /leastcommon")
-      .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
-      ),
+  new SlashCommandBuilder()
+    .setName("leastcommon")
+    .setDescription("Bottom 10 least common warscrolls for a faction (by Used %)")
+    .addStringOption(o =>
+      o.setName("faction")
+        .setDescription("Faction name, e.g. 'Stormcast'")
+        .setRequired(true)
+    ),
 
-    // aliases: /impact and /impact10 do the same thing
-    new SlashCommandBuilder()
-      .setName("impact")
-      .setDescription("Top 10 warscrolls by impact (+pp) for a faction (Win% − Win% Without)")
-      .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
-      ),
-    new SlashCommandBuilder()
-      .setName("impact10")
-      .setDescription("Alias of /impact")
-      .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
-      ),
+  new SlashCommandBuilder()
+    .setName("impact")
+    .setDescription("Top 10 warscrolls with biggest win-rate impact for a faction (by |Impact pp|)")
+    .addStringOption(o =>
+      o.setName("faction")
+        .setDescription("Faction name, e.g. 'Slaves to Darkness'")
+        .setRequired(true)
+    )
+].map(c => c.toJSON());
 
-    new SlashCommandBuilder()
-      .setName("factionsummary")
-      .setDescription("Faction summary: common, least common, best & worst impact (top 3 each)")
-      .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
-      ),
-  ].map((c) => c.toJSON());
-
+/* ---------------- Startup ---------------- */
+client.once("ready", async () => {
+  console.log(`Logged in as ${client.user.tag}`);
   await client.application.commands.set(commands);
-
-  // Warm cache so first user doesn’t pay the fetch cost
-  loadCSV().catch(console.error);
+  console.log("Slash commands registered:", commands.map(c => `/${c.name}`).join(", "));
 });
 
-/* -------------------- Interaction handler (no double-ack, no 40060) -------------------- */
+/* ---------------- Interaction Handler ---------------- */
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  // ACK ONCE
-  await interaction.deferReply({ ephemeral: false });
+  await interaction.deferReply();
 
   try {
-    const cmd = interaction.commandName;
+    const { headers, rows } = await loadCSVCached(false);
 
-    if (cmd === "refresh") {
-      await loadCSV(true);
-      return interaction.editReply("✅ Cache refreshed.");
+    const idxFaction = getIdx(headers, "Faction");
+    const idxWarscroll = getIdx(headers, "Warscroll");
+    const idxGames = getIdx(headers, "Faction Games Featured");
+    const idxUsed = getIdx(headers, "Used %");
+
+    const command = interaction.commandName;
+
+    // -------- /help --------
+    if (command === "help") {
+      const out =
+        `**Woehammer Stats Bot — Commands**\n` +
+        `*(Ignoring rows with < ${MIN_GAMES} games)*\n\n` +
+        `• **/warscroll** name: Search warscrolls (partial matches)\n` +
+        `  Example: \`/warscroll name: krethusa\`\n\n` +
+        `• **/compare** a + b: Compare two warscrolls\n` +
+        `  Example: \`/compare a: krethusa b: scourge of ghyran krethusa\`\n\n` +
+        `• **/common** faction: Top 10 most used warscrolls (by Used %)\n` +
+        `  Example: \`/common faction: fyreslayers\`\n\n` +
+        `• **/leastcommon** faction: Bottom 10 least used warscrolls (by Used %)\n` +
+        `  Example: \`/leastcommon faction: stormcast\`\n\n` +
+        `• **/impact** faction: Biggest win-rate swings (Impact in pp)\n` +
+        `  Example: \`/impact faction: slaves to darkness\`\n\n` +
+        `Impact = (Win %) - (Win % Without) shown as percentage points (pp).\n` +
+        `Source: Google Sheets (CSV)`;
+
+      return interaction.editReply(out);
     }
 
-    const { headers, rows, cached } = await loadCSV(false);
-    const all = rows.map((r) => rowToObj(headers, r));
-
-    if (cmd === "peek") {
-      return interaction.editReply(
-        `Headers I see${cached ? " (cached)" : ""}:\n• ${headers.join("\n• ")}`
-      );
-    }
-
-    // Required columns
-    const warscrollCol = idx(headers, "Warscroll");
-    const factionCol = idx(headers, "Faction");
-    if (warscrollCol === -1 || factionCol === -1) {
-      return interaction.editReply("❌ Missing required columns: `Faction` and/or `Warscroll`.");
-    }
-
-    /* -------------------- /warscroll -------------------- */
-    if (cmd === "warscroll") {
-      const raw = interaction.options.getString("name", true);
+    // -------- /warscroll --------
+    if (command === "warscroll") {
+      const raw = interaction.options.getString("name");
       const q = normalise(raw);
 
-      const matches = all.filter((d) => normalise(d.Warscroll).includes(q));
-      if (!matches.length) return interaction.editReply(`No matches for "${raw}".`);
+      const matches = rows
+        .filter(r => asNumber(r[idxGames]) >= MIN_GAMES)
+        .filter(r => normalise(r[idxWarscroll]).includes(q))
+        .slice(0, 10);
 
-      // cap at 10 results so we don’t hit Discord limits
-      const shown = matches.slice(0, 10);
+      if (!matches.length) {
+        return interaction.editReply(`No matches for "${raw}" (min games filter: ${MIN_GAMES}+).`);
+      }
 
-      const lines = shown.map((d, i) => {
-        const usedTxt = d["Used %"] ? `${fmtPct(d["Used %"])} of faction lists` : "—";
+      const lines = matches.map(r => formatWarscrollLine(pickRowData(headers, r)));
+
+      const out =
+        `**Warscroll results for:** ${raw}\n` +
+        `*(Ignoring rows with < ${MIN_GAMES} games)*\n\n` +
+        lines.join("\n\n") +
+        `\n\nSource: Google Sheets (CSV)`;
+
+      return interaction.editReply(out);
+    }
+
+    // -------- /compare --------
+    if (command === "compare") {
+      const aRaw = interaction.options.getString("a");
+      const bRaw = interaction.options.getString("b");
+      const aQ = normalise(aRaw);
+      const bQ = normalise(bRaw);
+
+      const eligible = rows.filter(r => asNumber(r[idxGames]) >= MIN_GAMES);
+
+      const aRow = eligible.find(r => normalise(r[idxWarscroll]).includes(aQ));
+      const bRow = eligible.find(r => normalise(r[idxWarscroll]).includes(bQ));
+
+      if (!aRow || !bRow) {
+        const missing = [
+          !aRow ? `A ("${aRaw}")` : null,
+          !bRow ? `B ("${bRaw}")` : null
+        ].filter(Boolean).join(" and ");
+
+        return interaction.editReply(
+          `Couldn’t find ${missing} (min games filter: ${MIN_GAMES}+). Try more letters.`
+        );
+      }
+
+      const a = pickRowData(headers, aRow);
+      const b = pickRowData(headers, bRow);
+
+      const out =
+        `**Compare** *(Ignoring rows with < ${MIN_GAMES} games)*\n\n` +
+        `A) ${formatWarscrollLine(a)}\n\n` +
+        `B) ${formatWarscrollLine(b)}\n\n` +
+        `Source: Google Sheets (CSV)`;
+
+      return interaction.editReply(out);
+    }
+
+    // shared faction list builder for /common /leastcommon /impact
+    const buildFactionList = (factionQuery) => {
+      const elig = rows
+        .filter(r => asNumber(r[idxGames]) >= MIN_GAMES)
+        .filter(r => factionMatch(r[idxFaction], factionQuery));
+
+      return elig.map(r => pickRowData(headers, r));
+    };
+
+    // -------- /common --------
+    if (command === "common") {
+      const faction = interaction.options.getString("faction");
+      const list = buildFactionList(faction);
+
+      if (!list.length) {
+        return interaction.editReply(`No rows found for "${faction}" (min games filter: ${MIN_GAMES}+).`);
+      }
+
+      list.sort((a, b) => {
+        const du = asNumber(b["Used %"]) - asNumber(a["Used %"]);
+        if (du !== 0) return du;
+        return asNumber(b["Faction Games Featured"]) - asNumber(a["Faction Games Featured"]);
+      });
+
+      const top = list.slice(0, MAX_LIST_RESULTS);
+      const lines = top.map((d, i) =>
+        `${i + 1}. **${d.Warscroll}**\n` +
+        `Used: ${d["Used %"]} | Games: ${d["Faction Games Featured"]} | Win: ${d["Win %"]} | Impact: ${impactPP(d["Win %"], d["Win % Without"])}`
+      );
+
+      const out =
+        `**Top ${MAX_LIST_RESULTS} most common warscrolls — ${top[0].Faction}**\n` +
+        `Most common = highest Used %\n` +
+        `*(Ignoring rows with < ${MIN_GAMES} games)*\n\n` +
+        lines.join("\n\n") +
+        `\n\nSource: Google Sheets (CSV)`;
+
+      return interaction.editReply(out);
+    }
+
+    // -------- /leastcommon --------
+    if (command === "leastcommon") {
+      const faction = interaction.options.getString("faction");
+      const list = buildFactionList(faction);
+
+      if (!list.length) {
+        return interaction.editReply(`No rows found for "${faction}" (min games filter: ${MIN_GAMES}+).`);
+      }
+
+      list.sort((a, b) => {
+        const du = asNumber(a["Used %"]) - asNumber(b["Used %"]);
+        if (du !== 0) return du;
+        return asNumber(a["Faction Games Featured"]) - asNumber(b["Faction Games Featured"]);
+      });
+
+      const bottom = list.slice(0, MAX_LIST_RESULTS);
+      const lines = bottom.map((d, i) =>
+        `${i + 1}. **${d.Warscroll}**\n` +
+        `Used: ${d["Used %"]} | Games: ${d["Faction Games Featured"]} | Win: ${d["Win %"]} | Impact: ${impactPP(d["Win %"], d["Win % Without"])}`
+      );
+
+      const out =
+        `**Bottom ${MAX_LIST_RESULTS} least common warscrolls — ${bottom[0].Faction}**\n` +
+        `Least common = lowest Used %\n` +
+        `*(Ignoring rows with < ${MIN_GAMES} games)*\n\n` +
+        lines.join("\n\n") +
+        `\n\nSource: Google Sheets (CSV)`;
+
+      return interaction.editReply(out);
+    }
+
+    // -------- /impact --------
+    if (command === "impact") {
+      const faction = interaction.options.getString("faction");
+      const list = buildFactionList(faction);
+
+      if (!list.length) {
+        return interaction.editReply(`No rows found for "${faction}" (min games filter: ${MIN_GAMES}+).`);
+      }
+
+      list.sort((a, b) => {
+        const aImp = Math.abs(asNumber(a["Win %"]) - asNumber(a["Win % Without"]));
+        const bImp = Math.abs(asNumber(b["Win %"]) - asNumber(b["Win % Without"]));
+        if (bImp !== aImp) return bImp - aImp;
+        return asNumber(b["Faction Games Featured"]) - asNumber(a["Faction Games Featured"]);
+      });
+
+      const top = list.slice(0, MAX_LIST_RESULTS);
+      const lines = top.map((d, i) => {
+        const imp = impactPP(d["Win %"], d["Win % Without"]);
         return (
-          `${i + 1}. **${d.Warscroll}** (${d.Faction})\n` +
-          `Games: ${d["Faction Games Featured"] ?? "—"} | Win: ${fmtPct(d["Win %"])} | Used: ${usedTxt} | Avg/list: ${d["Av Per List"] ?? "—"} | Win w/o: ${fmtPct(d["Win % Without"])}`
+          `${i + 1}. **${d.Warscroll}**\n` +
+          `Impact: ${imp} | Used: ${d["Used %"]} | Games: ${d["Faction Games Featured"]} | Win: ${d["Win %"]} | Win w/o: ${d["Win % Without"]}`
         );
       });
 
-      const embed = makeEmbed(
-        `Warscroll results for: ${raw}`,
-        `Showing ${shown.length}${matches.length > shown.length ? ` of ${matches.length}` : ""} matches.`,
-        [{ name: "Results", value: lines.join("\n\n") }]
-      );
-      return interaction.editReply({ embeds: [embed] });
+      const out =
+        `**Top ${MAX_LIST_RESULTS} warscrolls by impact — ${top[0].Faction}**\n` +
+        `Impact = (Win %) - (Win % Without), shown as percentage points (pp)\n` +
+        `*(Ignoring rows with < ${MIN_GAMES} games)*\n\n` +
+        lines.join("\n\n") +
+        `\n\nSource: Google Sheets (CSV)`;
+
+      const chunks = safeChunk(out);
+      if (chunks.length === 1) return interaction.editReply(chunks[0]);
+
+      await interaction.editReply(chunks[0]);
+      for (let i = 1; i < chunks.length; i++) {
+        await interaction.followUp(chunks[i]);
+      }
+      return;
     }
 
-    /* -------------------- Faction-based commands -------------------- */
-    const isCommon = cmd === "common" || cmd === "top10";
-    const isLeast = cmd === "leastcommon" || cmd === "least10";
-    const isImpact = cmd === "impact" || cmd === "impact10";
-    const isSummary = cmd === "factionsummary";
+    return interaction.editReply("Unknown command. (This shouldn’t happen.)");
 
-    if (isCommon || isLeast || isImpact || isSummary) {
-      const factionRaw = interaction.options.getString("faction", true);
-      const { rows: factionRows, chosen } = pickFactionRows(all, factionRaw);
-
-      if (!factionRows.length) {
-        // suggest a few faction names
-        const uniq = [...new Set(all.map((d) => d.Faction).filter(Boolean))];
-        const sug = uniq
-          .map((f) => ({ f, score: normalise(f).includes(normalise(factionRaw)) ? 0 : 1 }))
-          .sort((a, b) => a.score - b.score || a.f.localeCompare(b.f))
-          .slice(0, 5)
-          .map((x) => `• ${x.f}`)
-          .join("\n");
-        return interaction.editReply(`No faction match for "${factionRaw}". Try:\n${sug}`);
-      }
-
-      const factionName = chosen || factionRows[0].Faction;
-
-      // Common/Least by Used %
-      const usedSorted = [...factionRows].sort(
-        (a, b) => (asNumber(b["Used %"]) ?? -999) - (asNumber(a["Used %"]) ?? -999)
-      );
-
-      // Impact sort
-      const impactSorted = [...factionRows]
-        .map((d) => {
-          const win = d["Win %"];
-          const wwo = d["Win % Without"];
-          const diff = (asNumber(win) ?? 0) - (asNumber(wwo) ?? 0);
-          return { d, diff };
-        })
-        .sort((a, b) => b.diff - a.diff);
-
-      if (isCommon || isLeast) {
-        const list = (isCommon ? usedSorted : [...usedSorted].reverse()).slice(0, 10);
-
-        const lines = list.map((d, i) => {
-          return (
-            `${i + 1}. **${d.Warscroll}**\n` +
-            `Used: ${fmtPct(d["Used %"])} | Games: ${d["Faction Games Featured"] ?? "—"} | Win: ${fmtPct(d["Win %"])}`
-          );
-        });
-
-        const embed = makeEmbed(
-          isCommon
-            ? `Top 10 most common warscrolls — ${factionName}`
-            : `Bottom 10 least common warscrolls — ${factionName}`,
-          isCommon ? "Most common = highest Used %" : "Least common = lowest Used %",
-          [{ name: "Results", value: lines.join("\n\n") }]
-        );
-        return interaction.editReply({ embeds: [embed] });
-      }
-
-      if (isImpact) {
-        const list = impactSorted.slice(0, 10);
-
-        const lines = list.map((x, i) => {
-          const d = x.d;
-          const impact = ppDiff(d["Win %"], d["Win % Without"]);
-          return (
-            `${i + 1}. **${d.Warscroll}**\n` +
-            `Impact: ${impact} | Win: ${fmtPct(d["Win %"])} | Win w/o: ${fmtPct(d["Win % Without"])} | Used: ${fmtPct(d["Used %"])} | Games: ${d["Faction Games Featured"] ?? "—"}`
-          );
-        });
-
-        const embed = makeEmbed(
-          `Top 10 warscrolls by impact — ${factionName}`,
-          "Impact = Win % − Win % Without (percentage points)",
-          [{ name: "Results", value: lines.join("\n\n") }]
-        );
-        return interaction.editReply({ embeds: [embed] });
-      }
-
-      if (isSummary) {
-        // Top 3 each to avoid Discord field limits
-        const topCommon = usedSorted.slice(0, 3);
-        const botLeast = [...usedSorted].reverse().slice(0, 3);
-        const bestImpact = impactSorted.slice(0, 3).map((x) => x.d);
-        const worstImpact = [...impactSorted].reverse().slice(0, 3).map((x) => x.d);
-
-        const fmtUsedLine = (d, i) =>
-          `${i + 1}. **${d.Warscroll}**\nUsed: ${fmtPct(d["Used %"])} | Games: ${d["Faction Games Featured"] ?? "—"} | Win: ${fmtPct(d["Win %"])}`;
-
-        const fmtImpactLine = (d, i) =>
-          `${i + 1}. **${d.Warscroll}**\nImpact: ${ppDiff(d["Win %"], d["Win % Without"])} | Win: ${fmtPct(d["Win %"])} | Win w/o: ${fmtPct(d["Win % Without"])} | Used: ${fmtPct(d["Used %"])}`;
-
-        const embed = makeEmbed(
-          `Faction summary — ${factionName}`,
-          "Top/bottom 3 for readability (Discord limits are tight).",
-          [
-            { name: "Top 3 most common (Used %)", value: topCommon.map(fmtUsedLine).join("\n\n") || "—" },
-            { name: "Bottom 3 least common (Used %)", value: botLeast.map(fmtUsedLine).join("\n\n") || "—" },
-            { name: "Top 3 best impact (+pp)", value: bestImpact.map(fmtImpactLine).join("\n\n") || "—" },
-            { name: "Bottom 3 worst impact (+pp)", value: worstImpact.map(fmtImpactLine).join("\n\n") || "—" },
-          ]
-        );
-
-        return interaction.editReply({ embeds: [embed] });
-      }
-    }
-
-    return interaction.editReply("❌ Unknown command.");
   } catch (err) {
     console.error(err);
-    // Already deferred, so only editReply here
-    return interaction.editReply("❌ Internal error (check logs).");
+    return interaction.editReply("❌ Internal error (check Railway logs).");
   }
 });
 
-/* -------------------- Login -------------------- */
+/* ---------------- Login ---------------- */
 client.login(process.env.DISCORD_TOKEN);
