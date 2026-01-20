@@ -140,7 +140,7 @@ function headerIndex(headers, name) {
 
 function buildSourceFooter() {
   const dt = new Date(cache.loadedAt || nowMs());
-  return `Source: Google Sheets (CSV) • Cached: ${dt.toLocaleString()}`;
+  return `Source: Woehammer GT Database • Cached: ${dt.toLocaleString()}`;
 }
 
 /* -------------------- Data extraction -------------------- */
