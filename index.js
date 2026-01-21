@@ -176,11 +176,10 @@ function withCacheBust(url) {
   return `${url}${sep}cb=${Date.now()}`;
 }
 
-async function fetchCSV(url) {
-  const busted = withCacheBust(url);
+async function fetchCSV(url, { cacheBust = false } = {}) {
+  const finalUrl = cacheBust ? withCacheBust(url) : url;
 
-  const res = await fetch(busted, {
-    cache: "no-store",
+  const res = await fetch(finalUrl, {
     headers: { "User-Agent": "WoehammerStatsBot/1.0" },
   });
 
@@ -311,7 +310,8 @@ function warscrollWinPct(row) {
       "Win Percentage",
     ])
   );
-                                      }
+}
+
 // Old impact columns (still used for display in /warscroll search and other outputs)
 function warscrollWinWithoutPct(row) {
   return toNum(
