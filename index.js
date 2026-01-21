@@ -106,7 +106,11 @@ function parseCSV(text) {
 
 // -------------------- Helpers --------------------
 function norm(s) {
-  return String(s ?? "").trim().toLowerCase();
+  return String(s ?? "")
+    .replace(/\u00A0/g, " ")   // NBSP -> space (Google Sheets loves these)
+    .replace(/\s+/g, " ")     // collapse whitespace
+    .trim()
+    .toLowerCase();
 }
 
 function toNum(x) {
@@ -258,7 +262,7 @@ const oss = warscrollCache
     used: warscrollUsedPct(r),
   }));
 
-console.log("Sample Ossiarch warscroll rows:", oss);
+console.log("Sample Ossiarch warscroll rows:\n", JSON.stringify(oss, null, 2));
   
   if (FACTION_CSV_URL) {
     try {
@@ -1190,7 +1194,9 @@ if (cmd === "factions") {
 
       const baseWin = factionWinPct(factionOverallRow);
       const baseName = factionName(factionOverallRow) || facInput;
-
+      
+      console.log("IMPACT baseline faction =", baseName, "baseWin =", baseWin);
+    
       if (!Number.isFinite(baseWin)) {
         const embed = makeBaseEmbed("No baseline").setDescription(
           `Found "${baseName}" but couldn't read its overall win rate from the faction CSV.`
