@@ -5,7 +5,6 @@
 //   SHEET_CSV_URL     (warscroll CSV)
 //   FACTION_CSV_URL   (faction CSV)
 
-import "dotenv/config";
 import {
   Client,
   GatewayIntentBits,
