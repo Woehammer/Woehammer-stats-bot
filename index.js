@@ -33,6 +33,9 @@ if (!SHEET_CSV_URL)
 if (!FACTION_CSV_URL)
   console.warn("⚠️ Missing FACTION_CSV_URL env var (faction commands will fail).");
 
+console.log("SHEET_CSV_URL =", SHEET_CSV_URL);
+console.log("FACTION_CSV_URL =", FACTION_CSV_URL);
+
 const MIN_GAMES = 5;
 
 import http from "http";
