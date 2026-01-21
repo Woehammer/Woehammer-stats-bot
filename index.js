@@ -252,7 +252,16 @@ function warscrollFaction(row) {
   return getCol(row, ["Faction", "faction"]);
 }
 function warscrollGames(row) {
-  return toNum(getCol(row, ["Games", "games"]));
+  return toNum(
+    getCol(row, [
+      "Games",
+      "games",
+      "Faction Games Featured",
+      "Games Featured",
+      "Faction Games",
+      "Featured Games",
+    ])
+  );
 }
 function warscrollUsedPct(row) {
   return toNum(getCol(row, ["Used %", "Used%", "Used", "Use %", "Used Percent"]));
