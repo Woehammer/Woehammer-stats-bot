@@ -787,8 +787,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       // New tidy presentation
       embed.setDescription(
         [
-          fmtHeaderLine(fac, form),
-          ``,
           `**Win Rate**`,
           `**Games:** ${fmtInt(games)}${
             Number.isFinite(share) ? ` (*${fmtPct(share, 1)} share*)` : ""
