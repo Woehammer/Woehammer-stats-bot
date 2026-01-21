@@ -158,8 +158,16 @@ let factionCache = [];
 let warscrollCachedAt = null;
 let factionCachedAt = null;
 
+function withCacheBust(url) {
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}cb=${Date.now()}`;
+}
+
 async function fetchCSV(url) {
-  const res = await fetch(url, {
+  const busted = withCacheBust(url);
+
+  const res = await fetch(busted, {
+    cache: "no-store",
     headers: { "User-Agent": "WoehammerStatsBot/1.0" },
   });
 
