@@ -242,7 +242,21 @@ async function refreshAllSoft() {
       console.warn("Warscroll refresh failed; keeping cache:", e?.message ?? e);
     }
   }
+console.log("Warscroll rows loaded:", warscrollCache.length);
 
+const oss = warscrollCache
+  .filter(r => norm(warscrollFaction(r)).includes("ossiarch"))
+  .slice(0, 5)
+  .map(r => ({
+    faction: warscrollFaction(r),
+    name: warscrollName(r),
+    games: warscrollGames(r),
+    win: warscrollWinPct(r),
+    used: warscrollUsedPct(r),
+  }));
+
+console.log("Sample Ossiarch warscroll rows:", oss);
+  
   if (FACTION_CSV_URL) {
     try {
       await loadFactions(true);
