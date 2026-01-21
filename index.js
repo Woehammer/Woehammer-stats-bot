@@ -277,7 +277,7 @@ function buildFactionBlurb(row) {
 
   const paragraphs = [];
 
-  // Paragraph 1: headline context
+  // Paragraph 1: sample + win rate
   if (Number.isFinite(games) && Number.isFinite(win)) {
     paragraphs.push(
       `Based on **${fmtInt(games)} games**, this faction is currently winning **${fmtPct(win, 1)}** of the time.`
@@ -286,57 +286,67 @@ function buildFactionBlurb(row) {
     paragraphs.push(`Based on **${fmtInt(games)} games**.`);
   }
 
-  // Paragraph 2: Elo explanation (plain English)
+  // Paragraph 2: Elo, explained plainly (baseline = 400)
   if (Number.isFinite(avg) && Number.isFinite(med) && Number.isFinite(gap)) {
-    let eloExplanation = "";
+    const avgDelta = avg - 400;
+    const medDelta = med - 400;
 
-    if (gap >= 40) {
-      eloExplanation =
-        "a small number of very strong players are carrying most of the success. Outside of those top players, results drop off sharply";
-    } else if (gap >= 25) {
-      eloExplanation =
-        "experienced players tend to do well with this faction, but less experienced players struggle to keep up";
-    } else if (gap >= 10) {
-      eloExplanation =
-        "results are fairly consistent across the player base, with only a small gap between the top and the average player";
-    } else if (gap > -10) {
-      eloExplanation =
-        "most players perform at a similar level, suggesting the faction behaves predictably regardless of experience";
-    } else {
-      eloExplanation =
-        "many average players are doing okay, but there are fewer standout finishes from elite players";
-    }
+    let playerbaseRead;
+    if (avgDelta >= 40) playerbaseRead = "well above average";
+    else if (avgDelta >= 20) playerbaseRead = "above average";
+    else if (avgDelta >= 5) playerbaseRead = "a little above average";
+    else if (avgDelta > -5) playerbaseRead = "about average";
+    else playerbaseRead = "below average";
+
+    let spreadRead;
+    if (gap >= 40) spreadRead = "Results are being pulled up by a smaller group of strong players.";
+    else if (gap >= 25) spreadRead = "Stronger players are doing noticeably better than the typical player.";
+    else if (gap >= 10) spreadRead = "Performance is fairly consistent across the player base.";
+    else if (gap > -10) spreadRead = "Most players sit in a similar skill band for this faction.";
+    else spreadRead = "The middle of the player base is doing okay, with fewer standout spikes at the top.";
 
     paragraphs.push(
-      `Looking at player strength, the Elo numbers suggest **${eloExplanation}**. The average Elo is **${fmt1(avg)}** (≈${fmtInt(
-        avg - 400
-      )} over the 400 baseline), compared to a median of **${fmt1(med)}**, giving a gap of **${fmt1(gap)}**.`
+      `Comparing Elo to the **400 baseline**, this faction has an **${playerbaseRead}** player base: average Elo **${fmt1(
+        avg
+      )}** (≈${fmtInt(avgDelta)} over 400) and median **${fmt1(med)}** (≈${fmtInt(
+        medDelta
+      )} over 400). The gap is **${fmt1(gap)}**, which suggests: ${spreadRead}`
     );
   }
 
-  // Paragraph 3: performance spread (simple + readable)
+  // Paragraph 3: interpret the finishes (not just repeat them)
   const havePerf =
     [p50, p41, p32, p23, p14, p05].some((x) => Number.isFinite(x));
 
   if (havePerf) {
-    const topBits = [];
-    if (Number.isFinite(p50)) topBits.push(`${fmtPct(p50, 2)} go **5–0**`);
-    if (Number.isFinite(p41)) topBits.push(`${fmtPct(p41, 1)} go **4–1**`);
+    // find the "most common" finish bucket
+    const buckets = [
+      { label: "5–0", v: p50 },
+      { label: "4–1", v: p41 },
+      { label: "3–2", v: p32 },
+      { label: "2–3", v: p23 },
+      { label: "1–4", v: p14 },
+      { label: "0–5", v: p05 },
+    ].filter((b) => Number.isFinite(b.v));
 
-    const midBits = [];
-    if (Number.isFinite(p32)) midBits.push(`${fmtPct(p32, 1)} go **3–2**`);
-    if (Number.isFinite(p23)) midBits.push(`${fmtPct(p23, 1)} go **2–3**`);
+    buckets.sort((a, b) => b.v - a.v);
+    const mostCommon = buckets[0];
 
-    const lowBits = [];
-    if (Number.isFinite(p14)) lowBits.push(`${fmtPct(p14, 1)} go **1–4**`);
-    if (Number.isFinite(p05)) lowBits.push(`${fmtPct(p05, 1)} go **0–5**`);
+    // a quick “shape” read
+    const topShare = (Number.isFinite(p50) ? p50 : 0) + (Number.isFinite(p41) ? p41 : 0);
+    const lowShare = (Number.isFinite(p14) ? p14 : 0) + (Number.isFinite(p05) ? p05 : 0);
 
-    const lines = [];
-    if (topBits.length) lines.push(`Top finishes: ${topBits.join(", ")}.`);
-    if (midBits.length) lines.push(`Middle results: ${midBits.join(", ")}.`);
-    if (lowBits.length) lines.push(`Lower finishes: ${lowBits.join(", ")}.`);
+    let shape;
+    if (topShare >= 20) shape = "There’s a decent ceiling here — strong runs happen with some regularity.";
+    else if (lowShare >= 35) shape = "A lot of players are struggling to convert games into wins.";
+    else shape = "Most results cluster in the middle — lots of ‘roughly even’ tournament runs.";
 
-    if (lines.length) paragraphs.push(lines.join(" "));
+    paragraphs.push(
+      `Most players are finishing events around **${mostCommon.label}** (about **${fmtPct(
+        mostCommon.v,
+        1
+      )}**). ${shape}`
+    );
   }
 
   return paragraphs.join("\n\n");
