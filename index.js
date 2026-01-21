@@ -153,11 +153,11 @@ function nowStamp() {
 }
 
 async function loadWarscrollData({ force = false } = {}) {
-  if (!WARSCROLL_CSV_URL) throw new Error("Missing SHEET_CSV_URL env var");
+  if (!SHEET_CSV_URL) throw new Error("Missing SHEET_CSV_URL env var");
 
   if (!force && warscrollCache.headers && warscrollCache.rows) return warscrollCache;
 
-  const text = await fetchText(WARSCROLL_CSV_URL);
+  const text = await fetchText(SHEET_CSV_URL);
   const parsed = parseCSV(text);
 
   warscrollCache = {
@@ -397,6 +397,19 @@ client.once(Events.ClientReady, async () => {
 
   // Global command update
   await client.application.commands.set(commands);
+
+  const GUILD_ID = process.env.GUILD_ID; // set this in Railway env vars for your test server
+
+// Global command update
+await client.application.commands.set(commands);
+
+// OPTIONAL: wipe guild commands so you don't get duplicates
+if (GUILD_ID) {
+  const guild = await client.guilds.fetch(GUILD_ID);
+  await guild.commands.set([]); // nukes all guild-scoped commands
+  console.log(`Wiped guild commands in ${guild.name}`);
+}
+
 
   // Warm the cache once at boot (fast responses afterwards)
   try {
