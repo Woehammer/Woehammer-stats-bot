@@ -197,7 +197,7 @@ async function loadWarscrolls(force = false) {
   if (!SHEET_CSV_URL) throw new Error("Missing SHEET_CSV_URL env var");
   if (!force && warscrollCache.length) return;
 
-  warscrollCache = await fetchCSV(SHEET_CSV_URL);
+  warscrollCache = await fetchCSV(SHEET_CSV_URL, { cacheBust: force });
   warscrollCachedAt = new Date();
 }
 
@@ -205,7 +205,7 @@ async function loadFactions(force = false) {
   if (!FACTION_CSV_URL) throw new Error("Missing FACTION_CSV_URL env var");
   if (!force && factionCache.length) return;
 
-  factionCache = await fetchCSV(FACTION_CSV_URL);
+  factionCache = await fetchCSV(FACTION_CSV_URL, { cacheBust: force });
   factionCachedAt = new Date();
 }
 
