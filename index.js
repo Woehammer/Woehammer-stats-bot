@@ -35,6 +35,19 @@ if (!FACTION_CSV_URL)
 
 const MIN_GAMES = 5;
 
+import http from "http";
+
+const PORT = process.env.PORT || 3000;
+
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("ok");
+  })
+  .listen(PORT, () => {
+    console.log(`Healthcheck server listening on ${PORT}`);
+  });
+
 // -------------------- CSV parsing (handles quotes reasonably) --------------------
 function parseCSV(text) {
   text = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
