@@ -279,18 +279,39 @@ function warscrollGames(row) {
       "games",
       "Faction Games Featured",
       "Games Featured",
+      "Games Featured (Faction)",
       "Faction Games",
-      "Featured Games",
+      "Games Featured ",
     ])
   );
 }
 function warscrollUsedPct(row) {
-  return toNum(getCol(row, ["Used %", "Used%", "Used", "Use %", "Used Percent"]));
+  return toNum(
+    getCol(row, [
+      "Used %",
+      "Used%",
+      "Used",
+      "Use %",
+      "Used Percent",
+      "Usage %",
+      "Pick %",
+      "Picked %",
+    ])
+  );
 }
 function warscrollWinPct(row) {
-  return toNum(getCol(row, ["Win %", "Win%", "Win Rate", "Win rate"]));
-}
-
+  return toNum(
+    getCol(row, [
+      "Win %",
+      "Win%",
+      "Win Rate",
+      "Win rate",
+      "Winrate",
+      "Wins %",
+      "Win Percentage",
+    ])
+  );
+                                      }
 // Old impact columns (still used for display in /warscroll search and other outputs)
 function warscrollWinWithoutPct(row) {
   return toNum(
