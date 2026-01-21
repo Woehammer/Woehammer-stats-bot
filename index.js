@@ -484,6 +484,74 @@ function formatTopWarscrollsBlock(list) {
   return [`**Most-used warscrolls**`, ...lines].join("\n");
 }
 
+// -------------------- Discovery + Autocomplete helpers --------------------
+//
+// Goal:
+// - As the user types, Discord suggests factions, formations, and warscrolls.
+// - Discovery commands can list factions/formations/etc without needing exact spelling.
+//
+// Notes:
+// - Autocomplete requires option.setAutocomplete(true) in your SlashCommand definitions.
+// - This code only *provides suggestions*; it does not change your existing commands yet.
+
+function uniq(arr) {
+  return [...new Set(arr.filter(Boolean))];
+}
+
+function startsOrIncludes(haystack, needle) {
+  const h = norm(haystack);
+  const n = norm(needle);
+  if (!n) return true;
+  // Prefer "starts with", then "includes"
+  return h.startsWith(n) || h.includes(n);
+}
+
+function limitChoices(choices, max = 25) {
+  // Discord autocomplete max is 25
+  return choices.slice(0, max);
+}
+
+// Build faction name list from factionCache (best source for “canonical” names)
+function getAllFactions() {
+  const pool = factionCache.filter((r) => factionGames(r) >= MIN_GAMES);
+  const names = pool.map((r) => factionName(r)).map((x) => String(x ?? "").trim());
+  return uniq(names);
+}
+
+// Build formation list for a given faction input (from factionCache)
+function getFormationsForFaction(factionInput) {
+  const fq = norm(factionInput);
+  const pool = factionCache.filter((r) => factionGames(r) >= MIN_GAMES);
+  const rows = pool.filter((r) => norm(factionName(r)).includes(fq));
+  const forms = rows.map((r) => formationName(r)).map((x) => String(x ?? "").trim());
+  return uniq(forms);
+}
+
+// Build warscroll list, optionally filtered by faction (from warscrollCache)
+function getWarscrolls({ factionInput = null } = {}) {
+  let rows = warscrollCache.filter((r) => warscrollGames(r) >= MIN_GAMES);
+
+  if (factionInput) {
+    const fq = norm(factionInput);
+    rows = rows.filter((r) => norm(warscrollFaction(r)).includes(fq));
+  }
+
+  const names = rows.map((r) => warscrollName(r)).map((x) => String(x ?? "").trim());
+  return uniq(names);
+}
+
+// Return autocomplete choices: [{ name, value }]
+function makeChoices(list, typed) {
+  const out = list
+    .filter((x) => startsOrIncludes(x, typed))
+    .slice(0, 25)
+    .map((x) => ({
+      name: x.length > 100 ? x.slice(0, 97) + "..." : x,
+      value: x,
+    }));
+  return out;
+}
+
 // -------------------- Discord client --------------------
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -498,53 +566,130 @@ client.once(Events.ClientReady, async () => {
       .setName("warscroll")
       .setDescription("Search warscroll stats (partial matches)")
       .addStringOption((o) =>
-        o.setName("name").setDescription("Warscroll name (or part of it)").setRequired(true)
+        o
+          .setName("name")
+          .setDescription("Warscroll name (or part of it)")
+          .setRequired(true)
+          .setAutocomplete(true)
       ),
 
     new SlashCommandBuilder()
       .setName("compare")
       .setDescription("Compare two warscrolls")
-      .addStringOption((o) => o.setName("a").setDescription("Warscroll A").setRequired(true))
-      .addStringOption((o) => o.setName("b").setDescription("Warscroll B").setRequired(true)),
+      .addStringOption((o) =>
+        o
+          .setName("a")
+          .setDescription("Warscroll A")
+          .setRequired(true)
+          .setAutocomplete(true)
+      )
+      .addStringOption((o) =>
+        o
+          .setName("b")
+          .setDescription("Warscroll B")
+          .setRequired(true)
+          .setAutocomplete(true)
+      ),
 
     new SlashCommandBuilder()
       .setName("common")
       .setDescription("Top 10 most common warscrolls for a faction (by Used %)")
       .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
+        o
+          .setName("faction")
+          .setDescription("Faction name")
+          .setRequired(true)
+          .setAutocomplete(true)
       ),
 
     new SlashCommandBuilder()
       .setName("leastcommon")
       .setDescription("Bottom 10 least common warscrolls for a faction (by Used %)")
       .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
+        o
+          .setName("faction")
+          .setDescription("Faction name")
+          .setRequired(true)
+          .setAutocomplete(true)
       ),
 
-    // Updated meaning: lift above faction overall win%
     new SlashCommandBuilder()
       .setName("impact")
       .setDescription("Top 10 warscrolls pulling the faction UP (vs faction overall win%)")
       .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
+        o
+          .setName("faction")
+          .setDescription("Faction name")
+          .setRequired(true)
+          .setAutocomplete(true)
       ),
 
-    // New: drag below faction overall win%
     new SlashCommandBuilder()
       .setName("leastimpact")
       .setDescription("Top 10 warscrolls pulling the faction DOWN (vs faction overall win%)")
       .addStringOption((o) =>
-        o.setName("faction").setDescription("Faction name").setRequired(true)
+        o
+          .setName("faction")
+          .setDescription("Faction name")
+          .setRequired(true)
+          .setAutocomplete(true)
       ),
 
     new SlashCommandBuilder()
       .setName("faction")
       .setDescription("Faction stats (overall or by battle formation)")
       .addStringOption((o) =>
-        o.setName("name").setDescription("Faction name").setRequired(true)
+        o
+          .setName("name")
+          .setDescription("Faction name")
+          .setRequired(true)
+          .setAutocomplete(true)
       )
       .addStringOption((o) =>
-        o.setName("formation").setDescription("Battle formation (optional)").setRequired(false)
+        o
+          .setName("formation")
+          .setDescription("Battle formation (optional)")
+          .setRequired(false)
+          .setAutocomplete(true)
+      ),
+
+    // -------------------- Discovery commands --------------------
+    new SlashCommandBuilder()
+      .setName("factions")
+      .setDescription("List factions (discovery)")
+      .addStringOption((o) =>
+        o
+          .setName("search")
+          .setDescription("Filter factions by name (optional)")
+          .setRequired(false)
+      ),
+
+    new SlashCommandBuilder()
+      .setName("formations")
+      .setDescription("List battle formations for a faction (discovery)")
+      .addStringOption((o) =>
+        o
+          .setName("faction")
+          .setDescription("Faction name")
+          .setRequired(true)
+          .setAutocomplete(true)
+      ),
+
+    new SlashCommandBuilder()
+      .setName("warscrolls")
+      .setDescription("List warscrolls (optionally filtered by faction) (discovery)")
+      .addStringOption((o) =>
+        o
+          .setName("faction")
+          .setDescription("Faction name (optional)")
+          .setRequired(false)
+          .setAutocomplete(true)
+      )
+      .addStringOption((o) =>
+        o
+          .setName("search")
+          .setDescription("Filter warscrolls by name (optional)")
+          .setRequired(false)
       ),
 
     new SlashCommandBuilder()
@@ -576,6 +721,87 @@ client.once(Events.ClientReady, async () => {
     console.log("✅ Cache warm attempt complete.");
   } catch (e) {
     console.warn("Cache warm failed:", e?.message ?? e);
+  }
+});
+
+/* -------------------- Autocomplete Handler -------------------- */
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isAutocomplete()) return;
+
+  try {
+    const cmd = interaction.commandName;
+    const focused = interaction.options.getFocused(true);
+    const typed = String(focused?.value ?? "");
+
+    // Soft load caches for suggestions
+    if (
+      ["faction", "impact", "leastimpact", "common", "leastcommon", "factions", "formations"].includes(
+        cmd
+      )
+    ) {
+      try {
+        await ensureFactions();
+      } catch {}
+    }
+    if (["warscroll", "compare", "warscrolls"].includes(cmd)) {
+      try {
+        await ensureWarscrolls();
+      } catch {}
+    }
+
+    // Helper for responding safely
+    const safeRespond = async (choices) => {
+      try {
+        return await interaction.respond(choices.slice(0, 25));
+      } catch {
+        // ignore
+      }
+    };
+
+    // /faction name + formation
+    if (cmd === "faction") {
+      if (focused.name === "name") {
+        const choices = makeChoices(getAllFactions(), typed);
+        return safeRespond(choices);
+      }
+      if (focused.name === "formation") {
+        const fac = interaction.options.getString("name") ?? "";
+        const forms = fac ? getFormationsForFaction(fac) : [];
+        const choices = makeChoices(forms, typed);
+        return safeRespond(choices);
+      }
+    }
+
+    // faction pickers
+    if (["impact", "leastimpact", "common", "leastcommon", "formations"].includes(cmd)) {
+      if (focused.name === "faction") {
+        const choices = makeChoices(getAllFactions(), typed);
+        return safeRespond(choices);
+      }
+    }
+
+    // warscroll pickers
+    if (cmd === "warscroll" && focused.name === "name") {
+      const choices = makeChoices(getWarscrolls(), typed);
+      return safeRespond(choices);
+    }
+
+    if (cmd === "compare" && (focused.name === "a" || focused.name === "b")) {
+      const choices = makeChoices(getWarscrolls(), typed);
+      return safeRespond(choices);
+    }
+
+    if (cmd === "warscrolls" && focused.name === "faction") {
+      const choices = makeChoices(getAllFactions(), typed);
+      return safeRespond(choices);
+    }
+
+    // Nothing matched
+    return safeRespond([]);
+  } catch {
+    try {
+      return interaction.respond([]);
+    } catch {}
   }
 });
 
@@ -650,7 +876,82 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (["faction", "impact", "leastimpact"].includes(cmd)) {
       await ensureFactions();
     }
+if (cmd === "factions") {
+      await ensureFactions();
 
+      const search = interaction.options.getString("search") ?? "";
+      const all = getAllFactions();
+      const filtered = search ? all.filter((x) => startsOrIncludes(x, search)) : all;
+
+      if (!filtered.length) {
+        const embed = makeBaseEmbed("No results").setDescription(
+          `No factions match "${search}".`
+        );
+        addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+        return interaction.editReply({ embeds: [embed] });
+      }
+
+      const embed = makeBaseEmbed("Factions (discovery)").setDescription(
+        filtered.slice(0, 50).map((x) => `• ${x}`).join("\n") +
+          (filtered.length > 50 ? `\n\n…and ${filtered.length - 50} more.` : "")
+      );
+
+      addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+      return interaction.editReply({ embeds: [embed] });
+    }
+
+    if (cmd === "formations") {
+      await ensureFactions();
+
+      const facInput = interaction.options.getString("faction");
+      const forms = getFormationsForFaction(facInput);
+
+      if (!forms.length) {
+        const embed = makeBaseEmbed("No results").setDescription(
+          `No formations found for "${facInput}" (≥ ${MIN_GAMES} games).`
+        );
+        addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+        return interaction.editReply({ embeds: [embed] });
+      }
+
+      const embed = makeBaseEmbed(`Formations — ${facInput}`).setDescription(
+        forms.slice(0, 50).map((x) => `• ${x}`).join("\n") +
+          (forms.length > 50 ? `\n\n…and ${forms.length - 50} more.` : "")
+      );
+
+      addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+      return interaction.editReply({ embeds: [embed] });
+    }
+
+    if (cmd === "warscrolls") {
+      await ensureWarscrolls();
+
+      const facInput = interaction.options.getString("faction");
+      const search = interaction.options.getString("search") ?? "";
+
+      const list = getWarscrolls({ factionInput: facInput ?? null });
+      const filtered = search ? list.filter((x) => startsOrIncludes(x, search)) : list;
+
+      if (!filtered.length) {
+        const embed = makeBaseEmbed("No results").setDescription(
+          `No warscrolls found${facInput ? ` for "${facInput}"` : ""}${
+            search ? ` matching "${search}"` : ""
+          } (≥ ${MIN_GAMES} games).`
+        );
+        addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+        return interaction.editReply({ embeds: [embed] });
+      }
+
+      const title = facInput ? `Warscrolls — ${facInput}` : "Warscrolls (all)";
+      const embed = makeBaseEmbed(title).setDescription(
+        filtered.slice(0, 50).map((x) => `• ${x}`).join("\n") +
+          (filtered.length > 50 ? `\n\n…and ${filtered.length - 50} more.` : "")
+      );
+
+      addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+      return interaction.editReply({ embeds: [embed] });
+        }
+    
     if (cmd === "warscroll") {
       const q = norm(interaction.options.getString("name"));
 
