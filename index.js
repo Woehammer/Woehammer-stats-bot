@@ -1,336 +1,319 @@
-// index.js (ESM)
-// Discord.js v14+
+// index.js
+// Discord.js v14 single-file bot
 // Env vars required:
-// - DISCORD_TOKEN
-// - SHEET_CSV_URL
-// - FACTION_CSV_URL   (optional until your faction sheet is ready)
-// Optional:
-// - ADMIN_USER_IDS          (comma-separated Discord user IDs who can /refresh)
-// - MIN_GAMES               (default 5)
-// - PORT                    (for Railway/hosts that expect a web listener)
+//   DISCORD_TOKEN
+//   SHEET_CSV_URL     (warscroll CSV)
+//   FACTION_CSV_URL   (faction CSV)
 
+import "dotenv/config";
 import {
   Client,
   GatewayIntentBits,
   SlashCommandBuilder,
-  EmbedBuilder,
-  Events,
   PermissionFlagsBits,
+  Events,
+  EmbedBuilder,
 } from "discord.js";
 
-import http from "node:http";
+const TOKEN = process.env.DISCORD_TOKEN;
+const SHEET_CSV_URL = process.env.SHEET_CSV_URL;      // warscrolls
+const FACTION_CSV_URL = process.env.FACTION_CSV_URL;  // factions
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
-});
+if (!TOKEN) throw new Error("Missing DISCORD_TOKEN env var");
+if (!SHEET_CSV_URL) console.warn("⚠️ Missing SHEET_CSV_URL env var (warscroll commands will fail).");
+if (!FACTION_CSV_URL) console.warn("⚠️ Missing FACTION_CSV_URL env var (faction commands will fail).");
 
-const WARSCROLL_CSV_URL = process.env.SHEET_CSV_URL;
-const FACTION_CSV_URL = process.env.FACTION_CSV_URL;
+const MIN_GAMES = 5;
 
-const MIN_GAMES = Number(process.env.MIN_GAMES ?? 5);
-
-const ADMIN_USER_IDS = (process.env.ADMIN_USER_IDS ?? "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-function isAdmin(interaction) {
-  // Either explicitly listed, or has Discord Administrator permission
-  if (ADMIN_USER_IDS.includes(interaction.user.id)) return true;
-  const memberPerms = interaction.memberPermissions;
-  if (memberPerms?.has(PermissionFlagsBits.Administrator)) return true;
-  return false;
-}
-
-/* -------------------- Tiny HTTP listener (helps some hosts) -------------------- */
-const PORT = process.env.PORT;
-if (PORT) {
-  http
-    .createServer((req, res) => {
-      res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("Woehammer Stats bot is alive.\n");
-    })
-    .listen(PORT, () => console.log(`HTTP listener on :${PORT}`));
-}
-
-/* -------------------- CSV + Cache -------------------- */
-let warscrollCache = { headers: null, rows: null, fetchedAt: null };
-let factionCache = { headers: null, rows: null, fetchedAt: null };
-
-async function fetchText(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Fetch failed ${res.status} for ${url}`);
-  return await res.text();
-}
-
-// Minimal CSV parser that handles quoted commas
+// -------------------- CSV parsing (handles quotes reasonably) --------------------
 function parseCSV(text) {
-  const lines = text
-    .split(/\r?\n/)
-    .map((l) => l.trimEnd())
-    .filter((l) => l.length);
+  // Normalise line endings and strip BOM
+  text = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 
-  if (!lines.length) return { headers: [], rows: [] };
-
-  const rows = lines.map(parseCSVLine);
-  const headers = rows.shift() ?? [];
-  return { headers, rows };
-}
-
-function parseCSVLine(line) {
-  const out = [];
-  let cur = "";
+  const rows = [];
+  let row = [];
+  let field = "";
   let inQuotes = false;
 
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    const next = text[i + 1];
 
-    if (ch === '"' && line[i + 1] === '"') {
+    if (c === '"' && inQuotes && next === '"') {
       // Escaped quote
-      cur += '"';
+      field += '"';
       i++;
       continue;
     }
 
-    if (ch === '"') {
+    if (c === '"') {
       inQuotes = !inQuotes;
       continue;
     }
 
-    if (ch === "," && !inQuotes) {
-      out.push(cur.trim());
-      cur = "";
+    if (!inQuotes && (c === "," || c === "\n")) {
+      row.push(field);
+      field = "";
+
+      if (c === "\n") {
+        // End of row
+        // Skip completely empty trailing rows
+        if (row.some((x) => String(x ?? "").trim() !== "")) rows.push(row);
+        row = [];
+      }
       continue;
     }
 
-    cur += ch;
+    field += c;
   }
 
-  out.push(cur.trim());
-  return out.map((c) => c.replace(/^"|"$/g, "").trim());
+  // last field/row
+  row.push(field);
+  if (row.some((x) => String(x ?? "").trim() !== "")) rows.push(row);
+
+  if (!rows.length) return [];
+
+  const header = rows[0].map((h) => String(h ?? "").trim());
+  const data = rows.slice(1).map((r) => {
+    const obj = {};
+    for (let i = 0; i < header.length; i++) obj[header[i]] = r[i] ?? "";
+    return obj;
+  });
+
+  return data;
 }
 
-function normalize(str) {
-  return (str ?? "")
-    .toLowerCase()
-    .replace(/^the\s+/i, "")
-    .replace(/[^a-z0-9 ]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+// -------------------- Helpers --------------------
+function norm(s) {
+  return String(s ?? "").trim().toLowerCase();
 }
 
-function parsePercent(v) {
-  if (v == null) return null;
-  const s = String(v).trim().replace("%", "");
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
+function toNum(x) {
+  const s = String(x ?? "").trim();
+  if (!s) return NaN;
+  // strip % and commas
+  const cleaned = s.replace(/%/g, "").replace(/,/g, "");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : NaN;
 }
 
-function parseNumber(v) {
-  if (v == null) return null;
-  const n = Number(String(v).trim());
-  return Number.isFinite(n) ? n : null;
+function fmtPct(x, decimals = 0) {
+  if (!Number.isFinite(x)) return "—";
+  return `${x.toFixed(decimals)}%`;
 }
 
-function prettyPct(n, decimals = 0) {
-  if (n == null || !Number.isFinite(n)) return "—";
-  const d = decimals;
-  return `${n.toFixed(d)}%`;
+function fmtPP(x) {
+  if (!Number.isFinite(x)) return "—";
+  const sign = x > 0 ? "+" : "";
+  return `${sign}${Math.round(x)}pp`;
 }
 
-function prettyNum(n, decimals = 1) {
-  if (n == null || !Number.isFinite(n)) return "—";
-  return n.toFixed(decimals);
+function fmt1(x) {
+  if (!Number.isFinite(x)) return "—";
+  return x.toFixed(1);
 }
 
-function nowStamp() {
-  // UK-ish readable stamp without timezone fuss
-  const d = new Date();
-  return `${d.toLocaleDateString("en-GB")} ${d.toLocaleTimeString("en-GB", {
-    hour: "2-digit",
-    minute: "2-digit",
-  })}`;
+function fmtInt(x) {
+  if (!Number.isFinite(x)) return "—";
+  return `${Math.round(x)}`;
 }
 
-async function loadWarscrollData({ force = false } = {}) {
+function nowStr(d = new Date()) {
+  return d.toLocaleString("en-GB", { hour12: true });
+}
+
+function makeBaseEmbed(title) {
+  return new EmbedBuilder()
+    .setTitle(title)
+    .setFooter({ text: "Source: Woehammer GT Database" });
+}
+
+function addCachedLine(embed, warscrollCachedAt, factionCachedAt) {
+  const parts = [];
+  if (warscrollCachedAt) parts.push(`Warscrolls: ${nowStr(warscrollCachedAt)}`);
+  if (factionCachedAt) parts.push(`Factions: ${nowStr(factionCachedAt)}`);
+  const cached = parts.length ? parts.join(" • ") : "—";
+  embed.setFooter({ text: `Source: Woehammer GT Database • Cached: ${cached}` });
+  return embed;
+}
+
+function isAdmin(interaction) {
+  // Administrator server permission check
+  return Boolean(interaction.memberPermissions?.has(PermissionFlagsBits.Administrator));
+}
+
+// -------------------- Caches --------------------
+let warscrollCache = [];
+let factionCache = [];
+
+let warscrollCachedAt = null;
+let factionCachedAt = null;
+
+async function fetchCSV(url) {
+  const res = await fetch(url, { headers: { "User-Agent": "WoehammerStatsBot/1.0" } });
+  if (!res.ok) throw new Error(`Failed to fetch CSV (${res.status})`);
+  const text = await res.text();
+  return parseCSV(text);
+}
+
+async function loadWarscrolls(force = false) {
   if (!SHEET_CSV_URL) throw new Error("Missing SHEET_CSV_URL env var");
+  if (!force && warscrollCache.length) return;
 
-  if (!force && warscrollCache.headers && warscrollCache.rows) return warscrollCache;
-
-  const text = await fetchText(SHEET_CSV_URL);
-  const parsed = parseCSV(text);
-
-  warscrollCache = {
-    headers: parsed.headers,
-    rows: parsed.rows,
-    fetchedAt: new Date(),
-  };
-
-  return warscrollCache;
+  warscrollCache = await fetchCSV(SHEET_CSV_URL);
+  warscrollCachedAt = new Date();
 }
 
-async function loadFactionData({ force = false } = {}) {
-  if (!FACTION_CSV_URL) {
-    return {
-      headers: null,
-      rows: null,
-      fetchedAt: null,
-      missing: true,
-    };
+async function loadFactions(force = false) {
+  if (!FACTION_CSV_URL) throw new Error("Missing FACTION_CSV_URL env var");
+  if (!force && factionCache.length) return;
+
+  factionCache = await fetchCSV(FACTION_CSV_URL);
+  factionCachedAt = new Date();
+}
+
+async function refreshAll() {
+  await Promise.all([loadWarscrolls(true), loadFactions(true)]);
+}
+
+// -------------------- Column getters (tolerant to header changes) --------------------
+function getCol(row, candidates) {
+  for (const c of candidates) {
+    if (c in row) return row[c];
+  }
+  return "";
+}
+
+// warscroll columns (your sheet may vary)
+function warscrollName(row) {
+  return getCol(row, ["Warscroll", "warscroll", "Name", "Unit", "Unit Name"]);
+}
+function warscrollFaction(row) {
+  return getCol(row, ["Faction", "faction"]);
+}
+function warscrollGames(row) {
+  return toNum(getCol(row, ["Games", "games"]));
+}
+function warscrollUsedPct(row) {
+  return toNum(getCol(row, ["Used %", "Used%", "Used", "Use %", "Used Percent"]));
+}
+function warscrollWinPct(row) {
+  return toNum(getCol(row, ["Win %", "Win%", "Win Rate", "Win rate"]));
+}
+function warscrollWinWithoutPct(row) {
+  return toNum(getCol(row, ["Win % Without", "Win% Without", "Win Without", "Win w/o", "Win Without %"]));
+}
+function warscrollImpactPP(row) {
+  // If you already have Impact in pp, use it.
+  const direct = toNum(getCol(row, ["Impact", "Impact (pp)", "Impact pp", "Impact in pp"]));
+  if (Number.isFinite(direct)) return direct;
+
+  const w = warscrollWinPct(row);
+  const wo = warscrollWinWithoutPct(row);
+  if (Number.isFinite(w) && Number.isFinite(wo)) return w - wo;
+  return NaN;
+}
+
+// faction columns (BOT_FACTION)
+function factionName(row) {
+  return getCol(row, ["Faction", "faction"]);
+}
+function formationName(row) {
+  return getCol(row, ["Battle Formation", "Battle formation", "Formation", "formation"]);
+}
+function factionGames(row) {
+  return toNum(getCol(row, ["Games", "games"]));
+}
+function factionGamesShare(row) {
+  return toNum(getCol(row, ["Games Share", "Games share", "Share", "Share %"]));
+}
+function factionWinPct(row) {
+  return toNum(getCol(row, ["Win %", "Win%", "Win Rate", "Win rate"]));
+}
+function factionAvgElo(row) {
+  return toNum(getCol(row, ["Average Elo", "Avg Elo", "AvgElo"]));
+}
+function factionMedianElo(row) {
+  return toNum(getCol(row, ["Median Elo", "Med Elo", "MedianElo"]));
+}
+function factionEloGap(row) {
+  // Use sheet column if present, else compute
+  const direct = toNum(getCol(row, ["Elo Gap", "Elo gap", "Gap"]));
+  if (Number.isFinite(direct)) return direct;
+
+  const a = factionAvgElo(row);
+  const m = factionMedianElo(row);
+  if (Number.isFinite(a) && Number.isFinite(m)) return a - m;
+  return NaN;
+}
+function perf(row, key) {
+  return toNum(getCol(row, [key]));
+}
+
+// -------------------- Bot summary blurb --------------------
+function buildFactionBlurb(row) {
+  const games = factionGames(row);
+  const win = factionWinPct(row);
+
+  const avg = factionAvgElo(row);
+  const med = factionMedianElo(row);
+  const gap = factionEloGap(row);
+
+  // performance bins (percentages of players achieving that record)
+  const p50 = perf(row, "Players Achieving 5 Wins");
+  const p41 = perf(row, "Players Achieving 4 wins");
+  const p32 = perf(row, "Players Achieving 3 Wins");
+  const p23 = perf(row, "Players Achieving 2 wins");
+  const p14 = perf(row, "Players Achieving 1 Win");
+  const p05 = perf(row, "Players Without a Win");
+
+  const parts = [];
+
+  if (Number.isFinite(games)) parts.push(`Based on ${fmtInt(games)} games.`);
+
+  // Elo context: starting Elo is 400
+  const avgVs400 = Number.isFinite(avg) ? avg - 400 : NaN;
+  const medVs400 = Number.isFinite(med) ? med - 400 : NaN;
+
+  if (Number.isFinite(avg) && Number.isFinite(med) && Number.isFinite(gap)) {
+    const vibe =
+      gap >= 40 ? "specialist-driven (big Elo gap)" :
+      gap >= 20 ? "top-heavy (moderate Elo gap)" :
+      gap <= -20 ? "oddly inverted (median > average)" :
+      "pretty even (small Elo gap)";
+    parts.push(`Elo looks ${vibe}: avg ${fmt1(avg)} (≈${fmtInt(avgVs400)} over 400), median ${fmt1(med)} (≈${fmtInt(medVs400)} over 400), gap ${fmt1(gap)}.`);
+  } else if (Number.isFinite(avg) || Number.isFinite(med)) {
+    parts.push(`Elo: avg ${fmt1(avg)} (≈${fmtInt(avgVs400)} over 400), median ${fmt1(med)} (≈${fmtInt(medVs400)} over 400).`);
   }
 
-  if (!force && factionCache.headers && factionCache.rows) return factionCache;
-
-  const text = await fetchText(FACTION_CSV_URL);
-  const parsed = parseCSV(text);
-
-  factionCache = {
-    headers: parsed.headers,
-    rows: parsed.rows,
-    fetchedAt: new Date(),
-  };
-
-  return factionCache;
-}
-
-function cacheFooter() {
-  const w = warscrollCache.fetchedAt ? nowStamp() : "—";
-  // If faction cache exists, show whichever is newer
-  const f = factionCache.fetchedAt ? nowStamp() : null;
-  const stamp = f ? `${w} (warscroll) / ${f} (faction)` : w;
-  return `Source: Woehammer GT Database • Cached: ${stamp}`;
-}
-
-/* -------------------- Helpers: lookups -------------------- */
-function getIdx(headers, name) {
-  return headers.indexOf(name);
-}
-
-function rowToObj(headers, row) {
-  return Object.fromEntries(headers.map((h, i) => [h, row[i]]));
-}
-
-function bestMatchesByColumn(rows, headers, columnName, query, max = 10) {
-  const idx = getIdx(headers, columnName);
-  if (idx === -1) return [];
-
-  const q = normalize(query);
-  if (!q) return [];
-
-  const scored = rows
-    .map((r) => {
-      const val = r[idx] ?? "";
-      const n = normalize(val);
-      let score = 0;
-      if (n === q) score = 100;
-      else if (n.startsWith(q)) score = 80;
-      else if (n.includes(q)) score = 60;
-      else score = 0;
-      return { r, score, val };
-    })
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score);
-
-  return scored.slice(0, max).map((x) => x.r);
-}
-
-/* -------------------- Output builders -------------------- */
-function baseEmbed() {
-  return new EmbedBuilder().setColor(0x2f3136);
-}
-
-function warscrollLine(obj) {
-  const used = parsePercent(obj["Used %"]);
-  const games = parseNumber(obj["Faction Games Featured"]);
-  const win = parsePercent(obj["Win %"]);
-  const wout = parsePercent(obj["Win % Without"]);
-  const impact = win != null && wout != null ? win - wout : null;
-
-  return {
-    name: obj.Warscroll,
-    faction: obj.Faction,
-    used,
-    games,
-    win,
-    wout,
-    impact,
-    avPerList: parseNumber(obj["Av Per List"]),
-  };
-}
-
-function formatWarscrollResultLine(x) {
-  // name bold, stats on next line
-  const impactStr =
-    x.impact == null ? "Impact: —" : `Impact: ${(x.impact >= 0 ? "+" : "")}${x.impact.toFixed(0)}pp`;
-  const usedStr = x.used == null ? "Used: —" : `Used: ${x.used.toFixed(0)}% of faction lists`;
-  const gamesStr = x.games == null ? "Games: —" : `Games: ${x.games}`;
-  const winStr = x.win == null ? "Win: —" : `Win: ${x.win.toFixed(0)}%`;
-
-  return `**${x.name}**\n${usedStr} | ${gamesStr} | ${winStr} | ${impactStr}`;
-}
-
-function buildFactionSummary(obj) {
-  const games = parseNumber(obj["Games"]);
-  const share = parsePercent(obj["Games Share"]);
-  const win = parsePercent(obj["Win %"]);
-  const avgElo = parseNumber(obj["Average Elo"]);
-  const medElo = parseNumber(obj["Median Elo"]);
-  const gap = parseNumber(obj["Elo Gap"]);
-
-  const p5 = parsePercent(obj["Players Achieving 5 Wins"]);
-  const p4 = parsePercent(obj["Players Achieving 4 wins"]);
-  const p3 = parsePercent(obj["Players Achieving 3 Wins"]);
-  const p2 = parsePercent(obj["Players Achieving 2 wins"]);
-  const p1 = parsePercent(obj["Players Achieving 1 Win"]);
-  // optional columns might exist:
-  const p0 = parsePercent(obj["Players Achieving 0 Wins"]) ?? parsePercent(obj["Players Achieving 0 wins"]);
-  const p05 = parsePercent(obj["Players Achieving 0–5"]) ?? null; // ignore if not present
-
-  // Bot blurb logic (simple + readable)
-  let style = "mixed";
-  if (gap != null) {
-    if (gap >= 50) style = "specialist-driven";
-    else if (gap <= 15) style = "consistent";
+  if (Number.isFinite(win)) {
+    parts.push(`Win rate is ${fmtPct(win, 1)}.`);
   }
 
-  // Elo baseline reminder: 400 is starting Elo
-  let eloTake = "";
-  if (avgElo != null) {
-    if (avgElo >= 460) eloTake = "Above-average player pool (vs 400 start).";
-    else if (avgElo <= 410) eloTake = "Mostly newer/lower-rated player pool (vs 400 start).";
-    else eloTake = "Roughly average player pool (vs 400 start).";
-  }
+  const topEnd = [];
+  if (Number.isFinite(p50)) topEnd.push(`${fmtPct(p50, 2)} 5–0s`);
+  if (Number.isFinite(p41)) topEnd.push(`${fmtPct(p41, 1)} 4–1s`);
 
-  let wrTake = "";
-  if (win != null && avgElo != null) {
-    if (win >= 55 && avgElo <= 430) wrTake = "Win rate looks strong even without an elite Elo base.";
-    else if (win <= 45 && avgElo >= 460) wrTake = "Win rate underperforms despite a strong Elo base.";
-    else wrTake = "Win rate broadly matches the Elo profile.";
-  }
+  const lowEnd = [];
+  if (Number.isFinite(p05)) lowEnd.push(`${fmtPct(p05, 1)} 0–5`);
+  if (Number.isFinite(p14)) lowEnd.push(`${fmtPct(p14, 1)} 1–4`);
 
-  const lines = [];
+  if (topEnd.length) parts.push(`Top-end finishes: ${topEnd.join(", ")}.`);
+  if (lowEnd.length) parts.push(`Lower-end finishes: ${lowEnd.join(", ")}.`);
 
-  // Spread stats across lines (your request)
-  lines.push(`Games: **${games ?? "—"}** (${share != null ? `${share.toFixed(1)}% share` : "—"})`);
-  lines.push(`Win rate: **${win != null ? win.toFixed(1) + "%" : "—"}**`);
-  lines.push(`Elo: Avg **${avgElo != null ? avgElo.toFixed(1) : "—"}** | Median **${medElo != null ? medElo.toFixed(1) : "—"}** | Gap **${gap != null ? gap.toFixed(1) : "—"}**`);
-  lines.push(
-    `Finishes: 5–0 **${prettyPct(p5, 2)}** | 4–1 **${prettyPct(p4, 1)}** | 3–2 **${prettyPct(p3, 1)}**`
-  );
-  lines.push(
-    `More: 2–3 **${prettyPct(p2, 1)}** | 1–4 **${prettyPct(p1, 1)}**${p0 != null ? ` | 0–5 **${prettyPct(p0, 1)}**` : ""}`
-  );
+  // Middle bins (optional)
+  const mid = [];
+  if (Number.isFinite(p32)) mid.push(`${fmtPct(p32, 1)} 3–2`);
+  if (Number.isFinite(p23)) mid.push(`${fmtPct(p23, 1)} 2–3`);
+  if (mid.length) parts.push(`Middle: ${mid.join(", ")}.`);
 
-  const summary = [
-    `Based on **${games ?? "—"}** games. Results look **${style}**${gap != null ? ` (Elo gap ${gap.toFixed(1)})` : ""}.`,
-    eloTake,
-    wrTake,
-  ]
-    .filter(Boolean)
-    .join(" ");
-
-  return { lines, summary };
+  return parts.join(" ");
 }
+
+// -------------------- Discord client --------------------
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+});
 
 /* -------------------- Slash Commands -------------------- */
 client.once(Events.ClientReady, async () => {
@@ -351,12 +334,8 @@ client.once(Events.ClientReady, async () => {
     new SlashCommandBuilder()
       .setName("compare")
       .setDescription("Compare two warscrolls")
-      .addStringOption((o) =>
-        o.setName("a").setDescription("Warscroll A").setRequired(true)
-      )
-      .addStringOption((o) =>
-        o.setName("b").setDescription("Warscroll B").setRequired(true)
-      ),
+      .addStringOption((o) => o.setName("a").setDescription("Warscroll A").setRequired(true))
+      .addStringOption((o) => o.setName("b").setDescription("Warscroll B").setRequired(true)),
 
     new SlashCommandBuilder()
       .setName("common")
@@ -395,333 +374,352 @@ client.once(Events.ClientReady, async () => {
       .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   ].map((c) => c.toJSON());
 
-  // Global command update
+  // IMPORTANT:
+  // If you previously registered GUILD commands somewhere else, you can end up with duplicates
+  // (e.g., two /faction). This call sets GLOBAL commands only.
+  // If you still see duplicates, remove old guild commands in Discord dev portal or run a one-off clear.
   await client.application.commands.set(commands);
 
-  const GUILD_ID = process.env.GUILD_ID; // set this in Railway env vars for your test server
-
-// Global command update
-await client.application.commands.set(commands);
-
-// OPTIONAL: wipe guild commands so you don't get duplicates
-if (GUILD_ID) {
-  const guild = await client.guilds.fetch(GUILD_ID);
-  await guild.commands.set([]); // nukes all guild-scoped commands
-  console.log(`Wiped guild commands in ${guild.name}`);
-}
-
-
-  // Warm the cache once at boot (fast responses afterwards)
-  try {
-    await loadWarscrollData({ force: true });
-    await loadFactionData({ force: true });
-    console.log("Caches warmed.");
-  } catch (e) {
-    console.warn("Cache warm failed:", e?.message ?? e);
-  }
+  console.log("✅ Global slash commands registered/updated.");
 });
 
 /* -------------------- Interaction Handler -------------------- */
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  await interaction.deferReply();
+  // Always ack quickly to avoid "already acknowledged" / timeouts
+  try {
+    await interaction.deferReply();
+  } catch {
+    // If already deferred/replied, ignore.
+  }
 
   try {
     const cmd = interaction.commandName;
 
     if (cmd === "help") {
-      const embed = baseEmbed()
-        .setTitle("Woehammer Stats Bot — Commands")
-        .setDescription(
-          `*(Ignoring rows with < ${MIN_GAMES} games)*\n\n` +
-            `• **/warscroll** name: Search warscrolls (partial matches)\n` +
-            `  Example: \`/warscroll name: krethusa\`\n\n` +
-            `• **/compare** a + b: Compare two warscrolls\n` +
-            `  Example: \`/compare a: krethusa b: scourge of ghyran krethusa\`\n\n` +
-            `• **/common** faction: Top 10 most used warscrolls (by Used %)\n` +
-            `  Example: \`/common faction: fyreslayers\`\n\n` +
-            `• **/leastcommon** faction: Bottom 10 least used warscrolls (by Used %)\n` +
-            `  Example: \`/leastcommon faction: stormcast\`\n\n` +
-            `• **/impact** faction: Biggest win-rate swings (Impact in pp)\n` +
-            `  Example: \`/impact faction: slaves to darkness\`\n\n` +
-            `• **/faction** name + optional formation: Faction stats\n` +
-            `  Example: \`/faction name: blades of khorne\`\n` +
-            `  Example: \`/faction name: blades of khorne formation: the goretide\`\n\n` +
-            `Impact = (Win %) − (Win % Without) shown as percentage points (pp).\n\n` +
-            cacheFooter()
+      const embed = makeBaseEmbed("Woehammer Stats Bot — Commands")
+        .setDescription(`(Ignoring rows with < ${MIN_GAMES} games)`)
+        .addFields(
+          { name: "/warscroll name", value: "Search warscrolls (partial match)\nExample: `/warscroll name: krethusa`" },
+          { name: "/compare a b", value: "Compare two warscrolls\nExample: `/compare a: krethusa b: scourge of ghyran krethusa`" },
+          { name: "/common faction", value: "Top 10 most used warscrolls (by Used %)\nExample: `/common faction: ironjawz`" },
+          { name: "/leastcommon faction", value: "Bottom 10 least used warscrolls (by Used %)\nExample: `/leastcommon faction: stormcast`" },
+          { name: "/impact faction", value: "Biggest win-rate swings (Impact in pp)\nExample: `/impact faction: slaves to darkness`" },
+          { name: "/faction name formation?", value: "Faction stats (Overall or a specific battle formation)\nExample: `/faction name: blades of khorne formation: the goretide`" }
         );
 
-      return interaction.editReply({ embeds: [embed], content: "" });
+      addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+      return interaction.editReply({ embeds: [embed] });
     }
 
     if (cmd === "refresh") {
       if (!isAdmin(interaction)) {
-        const embed = baseEmbed()
-          .setTitle("❌ Not allowed")
-          .setDescription("You’re not on the admin list for `/refresh`.");
-        return interaction.editReply({ embeds: [embed], content: "" });
+        return interaction.editReply({ content: "❌ Admin only." });
       }
-
-      warscrollCache = { headers: null, rows: null, fetchedAt: null };
-      factionCache = { headers: null, rows: null, fetchedAt: null };
-
-      await loadWarscrollData({ force: true });
-      await loadFactionData({ force: true });
-
-      const embed = baseEmbed()
-        .setTitle("✅ Refreshed")
-        .setDescription(`Reloaded CSV data.\n\n${cacheFooter()}`);
-
-      return interaction.editReply({ embeds: [embed], content: "" });
+      await refreshAll();
+      const embed = makeBaseEmbed("✅ Refreshed CSV cache");
+      addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+      return interaction.editReply({ embeds: [embed] });
     }
 
-    // Warscroll sheet needed for the commands below
-    const { headers, rows } = await loadWarscrollData();
-
-    // Required warscroll columns sanity check
-    const idxFaction = getIdx(headers, "Faction");
-    const idxWarscroll = getIdx(headers, "Warscroll");
-    const idxGames = getIdx(headers, "Faction Games Featured");
-
-    if (idxFaction === -1 || idxWarscroll === -1 || idxGames === -1) {
-      const embed = baseEmbed()
-        .setTitle("❌ Sheet error")
-        .setDescription(
-          `I can’t find one or more required columns in the warscroll CSV.\n` +
-            `Need: **Faction**, **Warscroll**, **Faction Games Featured**.\n\n` +
-            cacheFooter()
-        );
-      return interaction.editReply({ embeds: [embed], content: "" });
+    // Warscroll-based commands require SHEET_CSV_URL
+    if (["warscroll", "compare", "common", "leastcommon", "impact"].includes(cmd)) {
+      await loadWarscrolls(false);
     }
 
-    // Filter out rows with < MIN_GAMES
-    const filtered = rows.filter((r) => {
-      const g = parseNumber(r[idxGames]);
-      return g != null && g >= MIN_GAMES;
-    });
+    // Faction-based commands require FACTION_CSV_URL
+    if (["faction"].includes(cmd)) {
+      await loadFactions(false);
+    }
 
     if (cmd === "warscroll") {
-      const queryRaw = interaction.options.getString("name");
-      const matches = bestMatchesByColumn(filtered, headers, "Warscroll", queryRaw, 10);
+      const q = norm(interaction.options.getString("name"));
+
+      const matches = warscrollCache
+        .filter((r) => warscrollGames(r) >= MIN_GAMES)
+        .filter((r) => norm(warscrollName(r)).includes(q))
+        .slice(0, 10);
 
       if (!matches.length) {
-        const embed = baseEmbed()
-          .setTitle("No matches")
-          .setDescription(`No warscroll rows found for **"${queryRaw}"** (≥ ${MIN_GAMES} games).\n\n${cacheFooter()}`);
-        return interaction.editReply({ embeds: [embed], content: "" });
+        const embed = makeBaseEmbed("No results")
+          .setDescription(`No warscroll rows found for "${interaction.options.getString("name")}" (≥ ${MIN_GAMES} games).`);
+        addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+        return interaction.editReply({ embeds: [embed] });
       }
 
-      const objs = matches.map((r) => warscrollLine(rowToObj(headers, r)));
+      const title = `Warscroll search — "${interaction.options.getString("name")}"`;
+      const embed = makeBaseEmbed(title);
 
-      const body = objs
-        .slice(0, 6)
-        .map((x, i) => `${i + 1}. ${formatWarscrollResultLine(x)}\n`)
-        .join("\n");
+      // Display in the “boxed” embed style you wanted:
+      // ONLY warscroll name in bold, stats on line below.
+      const lines = matches.map((r, i) => {
+        const name = warscrollName(r) || "Unknown";
+        const used = warscrollUsedPct(r);
+        const games = warscrollGames(r);
+        const win = warscrollWinPct(r);
+        const imp = warscrollImpactPP(r);
 
-      const embed = baseEmbed()
-        .setTitle(`Warscroll results for: ${queryRaw}`)
-        .setDescription(`${body}\n${cacheFooter()}`);
+        return [
+          `${i + 1}. **${name}**`,
+          `Used: ${fmtPct(used, 0)} | Games: ${fmtInt(games)} | Win: ${fmtPct(win, 0)} | Impact: ${fmtPP(imp)}`,
+        ].join("\n");
+      });
 
-      return interaction.editReply({ embeds: [embed], content: "" });
+      embed.setDescription(lines.join("\n\n"));
+      addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+      return interaction.editReply({ embeds: [embed] });
     }
 
     if (cmd === "compare") {
-      const aRaw = interaction.options.getString("a");
-      const bRaw = interaction.options.getString("b");
+      const aQ = norm(interaction.options.getString("a"));
+      const bQ = norm(interaction.options.getString("b"));
 
-      const aRow = bestMatchesByColumn(filtered, headers, "Warscroll", aRaw, 1)[0];
-      const bRow = bestMatchesByColumn(filtered, headers, "Warscroll", bRaw, 1)[0];
+      const pool = warscrollCache.filter((r) => warscrollGames(r) >= MIN_GAMES);
 
-      if (!aRow || !bRow) {
-        const embed = baseEmbed()
-          .setTitle("Not enough matches")
+      const aMatches = pool.filter((r) => norm(warscrollName(r)).includes(aQ));
+      const bMatches = pool.filter((r) => norm(warscrollName(r)).includes(bQ));
+
+      if (!aMatches.length || !bMatches.length) {
+        const embed = makeBaseEmbed("Compare — not enough matches")
           .setDescription(
-            `I couldn’t find both warscrolls (≥ ${MIN_GAMES} games).\n` +
-              `Try being a bit more specific.\n\n${cacheFooter()}`
+            [
+              !aMatches.length ? `No matches for A: "${interaction.options.getString("a")}"` : null,
+              !bMatches.length ? `No matches for B: "${interaction.options.getString("b")}"` : null,
+            ]
+              .filter(Boolean)
+              .join("\n")
           );
-        return interaction.editReply({ embeds: [embed], content: "" });
+        addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+        return interaction.editReply({ embeds: [embed] });
       }
 
-      const a = warscrollLine(rowToObj(headers, aRow));
-      const b = warscrollLine(rowToObj(headers, bRow));
+      const a = aMatches[0];
+      const b = bMatches[0];
 
-      const embed = baseEmbed()
-        .setTitle("Warscroll comparison")
+      function wsBlock(r) {
+        const name = warscrollName(r) || "Unknown";
+        const used = warscrollUsedPct(r);
+        const games = warscrollGames(r);
+        const win = warscrollWinPct(r);
+        const imp = warscrollImpactPP(r);
+        const fac = warscrollFaction(r);
+
+        return [
+          `**${name}**`,
+          fac ? `Faction: ${fac}` : null,
+          `Used: ${fmtPct(used, 0)} | Games: ${fmtInt(games)} | Win: ${fmtPct(win, 0)} | Impact: ${fmtPP(imp)}`,
+        ]
+          .filter(Boolean)
+          .join("\n");
+      }
+
+      const embed = makeBaseEmbed("Warscroll compare")
         .addFields(
-          {
-            name: `${a.name} (${a.faction})`,
-            value:
-              `Used: **${a.used?.toFixed(0) ?? "—"}%** of faction lists\n` +
-              `Games: **${a.games ?? "—"}**\n` +
-              `Win: **${a.win?.toFixed(0) ?? "—"}%**\n` +
-              `Win w/o: **${a.wout?.toFixed(0) ?? "—"}%**\n` +
-              `Impact: **${a.impact == null ? "—" : `${a.impact >= 0 ? "+" : ""}${a.impact.toFixed(0)}pp`}**`,
-            inline: true,
-          },
-          {
-            name: `${b.name} (${b.faction})`,
-            value:
-              `Used: **${b.used?.toFixed(0) ?? "—"}%** of faction lists\n` +
-              `Games: **${b.games ?? "—"}**\n` +
-              `Win: **${b.win?.toFixed(0) ?? "—"}%**\n` +
-              `Win w/o: **${b.wout?.toFixed(0) ?? "—"}%**\n` +
-              `Impact: **${b.impact == null ? "—" : `${b.impact >= 0 ? "+" : ""}${b.impact.toFixed(0)}pp`}**`,
-            inline: true,
-          }
-        )
-        .setFooter({ text: cacheFooter() });
+          { name: "A", value: wsBlock(a), inline: false },
+          { name: "B", value: wsBlock(b), inline: false }
+        );
 
-      return interaction.editReply({ embeds: [embed], content: "" });
+      addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+      return interaction.editReply({ embeds: [embed] });
     }
 
-    // faction-based warscroll lists
     if (cmd === "common" || cmd === "leastcommon" || cmd === "impact") {
-      const factionRaw = interaction.options.getString("faction");
-      const fNorm = normalize(factionRaw);
+      const facQ = norm(interaction.options.getString("faction"));
 
-      const factionRows = filtered.filter((r) => normalize(r[idxFaction]) === fNorm);
+      let rows = warscrollCache
+        .filter((r) => warscrollGames(r) >= MIN_GAMES)
+        .filter((r) => norm(warscrollFaction(r)).includes(facQ));
 
-      if (!factionRows.length) {
-        const embed = baseEmbed()
-          .setTitle("No results")
-          .setDescription(
-            `No warscroll rows found for **"${factionRaw}"** (≥ ${MIN_GAMES} games).\n\n${cacheFooter()}`
-          );
-        return interaction.editReply({ embeds: [embed], content: "" });
+      if (!rows.length) {
+        const embed = makeBaseEmbed("No results")
+          .setDescription(`No warscroll rows found for "${interaction.options.getString("faction")}" (≥ ${MIN_GAMES} games).`);
+        addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+        return interaction.editReply({ embeds: [embed] });
       }
 
-      const objs = factionRows.map((r) => warscrollLine(rowToObj(headers, r)));
-
-      let sorted = objs;
+      const prettyFaction = interaction.options.getString("faction");
 
       if (cmd === "common") {
-        sorted = [...objs].sort((a, b) => (b.used ?? -1) - (a.used ?? -1));
-      } else if (cmd === "leastcommon") {
-        sorted = [...objs].sort((a, b) => (a.used ?? 999999) - (b.used ?? 999999));
-      } else if (cmd === "impact") {
-        sorted = [...objs].sort((a, b) => Math.abs(b.impact ?? -1) - Math.abs(a.impact ?? -1));
+        rows = rows
+          .slice()
+          .sort((a, b) => (warscrollUsedPct(b) || -Infinity) - (warscrollUsedPct(a) || -Infinity))
+          .slice(0, 10);
+
+        const embed = makeBaseEmbed(`Top 10 most common warscrolls — ${prettyFaction}`)
+          .setDescription("Most common = highest Used %");
+
+        const lines = rows.map((r, i) => {
+          const name = warscrollName(r) || "Unknown";
+          const used = warscrollUsedPct(r);
+          const games = warscrollGames(r);
+          const win = warscrollWinPct(r);
+          const imp = warscrollImpactPP(r);
+
+          return [
+            `${i + 1}. **${name}**`,
+            `Used: ${fmtPct(used, 0)} | Games: ${fmtInt(games)} | Win: ${fmtPct(win, 0)} | Impact: ${fmtPP(imp)}`,
+          ].join("\n");
+        });
+
+        embed.addFields({ name: "Results", value: lines.join("\n\n") });
+        addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+        return interaction.editReply({ embeds: [embed] });
       }
 
-      const top = sorted.slice(0, 10);
+      if (cmd === "leastcommon") {
+        rows = rows
+          .slice()
+          .sort((a, b) => (warscrollUsedPct(a) || Infinity) - (warscrollUsedPct(b) || Infinity))
+          .slice(0, 10);
 
-      const headerTitle =
-        cmd === "common"
-          ? `Top 10 most common warscrolls — ${factionRaw}`
-          : cmd === "leastcommon"
-            ? `Bottom 10 least common warscrolls — ${factionRaw}`
-            : `Top 10 biggest impact warscrolls — ${factionRaw}`;
+        const embed = makeBaseEmbed(`Bottom 10 least common warscrolls — ${prettyFaction}`)
+          .setDescription("Least common = lowest Used %");
 
-      const sub =
-        cmd === "common"
-          ? `*Most common = highest Used %*`
-          : cmd === "leastcommon"
-            ? `*Least common = lowest Used %*`
-            : `*Impact = (Win %) − (Win % Without), in percentage points (pp)*`;
+        const lines = rows.map((r, i) => {
+          const name = warscrollName(r) || "Unknown";
+          const used = warscrollUsedPct(r);
+          const games = warscrollGames(r);
+          const win = warscrollWinPct(r);
+          const imp = warscrollImpactPP(r);
 
-      const body = top
-        .map((x, i) => `${i + 1}. ${formatWarscrollResultLine(x)}`)
-        .join("\n\n");
+          return [
+            `${i + 1}. **${name}**`,
+            `Used: ${fmtPct(used, 0)} | Games: ${fmtInt(games)} | Win: ${fmtPct(win, 0)} | Impact: ${fmtPP(imp)}`,
+          ].join("\n");
+        });
 
-      const embed = baseEmbed()
-        .setTitle(headerTitle)
-        .setDescription(`${sub}\n\n**Results**\n\n${body}\n\n${cacheFooter()}`);
+        embed.addFields({ name: "Results", value: lines.join("\n\n") });
+        addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+        return interaction.editReply({ embeds: [embed] });
+      }
 
-      return interaction.editReply({ embeds: [embed], content: "" });
+      if (cmd === "impact") {
+        rows = rows
+          .slice()
+          .sort((a, b) => {
+            const A = Math.abs(warscrollImpactPP(a) || 0);
+            const B = Math.abs(warscrollImpactPP(b) || 0);
+            return B - A;
+          })
+          .slice(0, 10);
+
+        const embed = makeBaseEmbed(`Top 10 warscrolls with biggest impact — ${prettyFaction}`)
+          .setDescription("Impact = (Win %) − (Win % Without) shown as percentage points (pp).");
+
+        const lines = rows.map((r, i) => {
+          const name = warscrollName(r) || "Unknown";
+          const used = warscrollUsedPct(r);
+          const games = warscrollGames(r);
+          const win = warscrollWinPct(r);
+          const imp = warscrollImpactPP(r);
+
+          return [
+            `${i + 1}. **${name}**`,
+            `Impact: ${fmtPP(imp)} | Win: ${fmtPct(win, 0)} | Used: ${fmtPct(used, 0)} | Games: ${fmtInt(games)}`,
+          ].join("\n");
+        });
+
+        embed.addFields({ name: "Results", value: lines.join("\n\n") });
+        addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+        return interaction.editReply({ embeds: [embed] });
+      }
     }
 
     if (cmd === "faction") {
-      const nameRaw = interaction.options.getString("name");
-      const formationRaw = interaction.options.getString("formation") ?? "Overall";
+      const fQ = norm(interaction.options.getString("name"));
+      const formationQRaw = interaction.options.getString("formation");
+      const formationQ = norm(formationQRaw);
 
-      const facData = await loadFactionData();
+      const pool = factionCache.filter((r) => factionGames(r) >= MIN_GAMES);
 
-      if (facData.missing) {
-        const embed = baseEmbed()
-          .setTitle("Faction sheet not configured")
-          .setDescription(
-            `You haven’t set **FACTION_CSV_URL** yet.\n\n` +
-              `Once you do, \`/faction\` will work.\n\n${cacheFooter()}`
-          );
-        return interaction.editReply({ embeds: [embed], content: "" });
+      const factionRows = pool.filter((r) => norm(factionName(r)).includes(fQ));
+      if (!factionRows.length) {
+        const embed = makeBaseEmbed("No results")
+          .setDescription(`No faction rows found for "${interaction.options.getString("name")}" (≥ ${MIN_GAMES} games).`);
+        addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+        return interaction.editReply({ embeds: [embed] });
       }
 
-      const fh = facData.headers;
-      const fr = facData.rows;
+      let row = null;
 
-      const fIdxFaction = getIdx(fh, "Faction");
-      const fIdxFormation = getIdx(fh, "Battle Formation");
-      const fIdxGames = getIdx(fh, "Games");
-
-      if (fIdxFaction === -1 || fIdxFormation === -1 || fIdxGames === -1) {
-        const embed = baseEmbed()
-          .setTitle("❌ Sheet error")
-          .setDescription(
-            `I can’t find required columns in BOT_FACTION CSV.\n` +
-              `Need: **Faction**, **Battle Formation**, **Games**.\n\n${cacheFooter()}`
-          );
-        return interaction.editReply({ embeds: [embed], content: "" });
+      if (formationQ) {
+        // find formation partial match
+        row = factionRows.find((r) => norm(formationName(r)).includes(formationQ));
+        if (!row) {
+          // Suggest formations
+          const formations = [...new Set(factionRows.map((r) => formationName(r)).filter(Boolean))].slice(0, 15);
+          const embed = makeBaseEmbed("Formation not found")
+            .setDescription(
+              `No formation match for "${formationQRaw}". Try one of:\n` +
+                formations.map((x) => `• ${x}`).join("\n")
+            );
+          addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+          return interaction.editReply({ embeds: [embed] });
+        }
+      } else {
+        // default to Overall row if present, else first
+        row =
+          factionRows.find((r) => norm(formationName(r)) === "overall") ||
+          factionRows[0];
       }
 
-      const fName = normalize(nameRaw);
-      const fFormation = normalize(formationRaw);
+      const fac = factionName(row) || interaction.options.getString("name");
+      const form = formationName(row) || (formationQRaw ? formationQRaw : "Overall");
 
-      const eligible = fr.filter((r) => {
-        const g = parseNumber(r[fIdxGames]);
-        return g != null && g >= MIN_GAMES;
-      });
+      const games = factionGames(row);
+      const share = factionGamesShare(row);
+      const win = factionWinPct(row);
 
-      // match faction exactly (normalized)
-      const byFaction = eligible.filter((r) => normalize(r[fIdxFaction]) === fName);
+      const avg = factionAvgElo(row);
+      const med = factionMedianElo(row);
+      const gap = factionEloGap(row);
 
-      if (!byFaction.length) {
-        const embed = baseEmbed()
-          .setTitle("No results")
-          .setDescription(`No faction rows found for **"${nameRaw}"** (≥ ${MIN_GAMES} games).\n\n${cacheFooter()}`);
-        return interaction.editReply({ embeds: [embed], content: "" });
-      }
+      const p50 = perf(row, "Players Achieving 5 Wins");
+      const p41 = perf(row, "Players Achieving 4 wins");
+      const p32 = perf(row, "Players Achieving 3 Wins");
+      const p23 = perf(row, "Players Achieving 2 wins");
+      const p14 = perf(row, "Players Achieving 1 Win");
+      const p05 = perf(row, "Players Without a Win");
 
-      // formation: try exact first, then contains
-      let picked =
-        byFaction.find((r) => normalize(r[fIdxFormation]) === fFormation) ??
-        byFaction.find((r) => normalize(r[fIdxFormation]).includes(fFormation));
+      const embed = makeBaseEmbed(`${fac} — ${form}`);
 
-      // if still nothing, default to Overall
-      if (!picked) {
-        picked = byFaction.find((r) => normalize(r[fIdxFormation]) === "overall") ?? byFaction[0];
-      }
+      // “different stat on each line”
+      embed.setDescription(
+        [
+          `Games: ${fmtInt(games)}${Number.isFinite(share) ? ` (${fmtPct(share, 1)} share)` : ""}`,
+          `Win rate: ${fmtPct(win, 1)}`,
+          `Elo: Avg ${fmt1(avg)} | Median ${fmt1(med)} | Gap ${fmt1(gap)} (start Elo = 400)`,
+          `Records: 5–0 ${fmtPct(p50, 2)} | 4–1 ${fmtPct(p41, 1)} | 3–2 ${fmtPct(p32, 1)}`,
+          `Records: 2–3 ${fmtPct(p23, 1)} | 1–4 ${fmtPct(p14, 1)} | 0–5 ${fmtPct(p05, 1)}`,
+          ``,
+          `**Bot summary**`,
+          buildFactionBlurb(row),
+        ].join("\n")
+      );
 
-      const obj = rowToObj(fh, picked);
-      const titleFaction = obj["Faction"] ?? nameRaw;
-      const titleFormation = obj["Battle Formation"] ?? formationRaw;
-
-      const { lines, summary } = buildFactionSummary(obj);
-
-      const embed = baseEmbed()
-        .setTitle(`${titleFaction} — ${titleFormation}`)
-        .setDescription(
-          `${lines.join("\n")}\n\n` +
-            `**Bot summary**\n${summary}\n\n` +
-            cacheFooter()
-        );
-
-      return interaction.editReply({ embeds: [embed], content: "" });
+      addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+      return interaction.editReply({ embeds: [embed] });
     }
 
-    // Unknown command fallback
-    const embed = baseEmbed()
-      .setTitle("❌ Unknown command")
-      .setDescription(`Try **/help**.\n\n${cacheFooter()}`);
-
-    return interaction.editReply({ embeds: [embed], content: "" });
+    // Fallback
+    return interaction.editReply({ content: "❌ Unknown command (try /help)." });
   } catch (err) {
-    console.error(err);
-    const embed = baseEmbed()
-      .setTitle("❌ Internal error")
-      .setDescription(`Check logs.\n\n${cacheFooter()}`);
-    return interaction.editReply({ embeds: [embed], content: "" });
+    console.error("COMMAND ERROR:", err);
+
+    const embed = makeBaseEmbed("❌ Internal error")
+      .setDescription(`Check logs.\n\n**Error:** ${String(err?.message ?? err)}`);
+
+    // If cache stamps are missing, keep the footer consistent anyway
+    addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+
+    // Try edit first (since we deferReply). If that fails, fall back.
+    try {
+      return interaction.editReply({ embeds: [embed] });
+    } catch {
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
   }
 });
 
-/* -------------------- Login -------------------- */
-client.login(process.env.DISCORD_TOKEN);
+client.login(TOKEN);
