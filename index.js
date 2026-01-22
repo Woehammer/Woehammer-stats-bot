@@ -1286,6 +1286,7 @@ if (cmd === "factions") {
 embed.addFields({ name: "Results", value: lines.join("\n\n") });
 addCachedLine(embed, warscrollCachedAt, factionCachedAt);
 return interaction.editReply({ embeds: [embed] });
+    }
 
     if (cmd === "faction") {
       const inputName = interaction.options.getString("name");
