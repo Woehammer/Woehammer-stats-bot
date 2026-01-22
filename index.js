@@ -171,6 +171,12 @@ function titleCaseMaybe(s) {
   return String(s ?? "").trim();
 }
 
+function fmtWinPair(withPct, withoutPct, decimals = 0) {
+  const w = fmtPct(withPct, decimals);
+  const wo = fmtPct(withoutPct, decimals);
+  return `Win: ${w} | Win w/o: ${wo}`;
+}
+
 // -------------------- Caches --------------------
 let warscrollCache = [];
 let factionCache = [];
@@ -262,8 +268,6 @@ const oss = warscrollCache
     used: warscrollUsedPct(r),
   }));
 
-console.log("Sample Ossiarch warscroll rows:\n", JSON.stringify(oss, null, 2));
-  
   if (FACTION_CSV_URL) {
     try {
       await loadFactions(true);
@@ -1045,16 +1049,19 @@ if (cmd === "factions") {
       );
 
       const lines = matches.map((r, i) => {
-        const name = warscrollName(r) || "Unknown";
-        return [
-          `${i + 1}. **${name}**`,
-          `Used: ${fmtPct(warscrollUsedPct(r), 0)} | Games: ${fmtInt(
-            warscrollGames(r)
-          )} | Win: ${fmtPct(warscrollWinPct(r), 0)} | Impact: ${fmtPP(
-            warscrollImpactPP(r)
-          )}`,
-        ].join("\n");
-      });
+  const name = warscrollName(r) || "Unknown";
+
+  const used = warscrollUsedPct(r);
+  const games = warscrollGames(r);
+  const win = warscrollWinPct(r);
+  const winWo = warscrollWinWithoutPct(r);
+  const impact = warscrollImpactPP(r); // if direct impact col missing, uses win - winWo
+
+  return [
+    `${i + 1}. **${name}**`,
+    `Used: ${fmtPct(used, 0)} | Games: ${fmtInt(games)} | ${fmtWinPair(win, winWo, 0)} | Impact: ${fmtPP(impact)}`,
+  ].join("\n");
+});
 
       embed.setDescription(lines.join("\n\n"));
       addCachedLine(embed, warscrollCachedAt, factionCachedAt);
@@ -1139,14 +1146,15 @@ if (cmd === "factions") {
         const embed = makeBaseEmbed(`Top 10 most common warscrolls — ${prettyFaction}`)
           .setDescription("Most common = highest Used %");
 
-        const lines = rows.map((r, i) =>
-          [
-            `${i + 1}. **${warscrollName(r) || "Unknown"}**`,
-            `Used: ${fmtPct(warscrollUsedPct(r), 0)} | Games: ${fmtInt(
-              warscrollGames(r)
-            )} | Win: ${fmtPct(warscrollWinPct(r), 0)}`,
-          ].join("\n")
-        );
+        const lines = rows.map((r, i) => {
+  const win = warscrollWinPct(r);
+  const winWo = warscrollWinWithoutPct(r);
+
+  return [
+    `${i + 1}. **${warscrollName(r) || "Unknown"}**`,
+    `Used: ${fmtPct(warscrollUsedPct(r), 0)} | Games: ${fmtInt(warscrollGames(r))} | ${fmtWinPair(win, winWo, 0)}`,
+  ].join("\n");
+});
 
         embed.addFields({ name: "Results", value: lines.join("\n\n") });
         addCachedLine(embed, warscrollCachedAt, factionCachedAt);
@@ -1165,14 +1173,15 @@ if (cmd === "factions") {
       const embed = makeBaseEmbed(`Bottom 10 least common warscrolls — ${prettyFaction}`)
         .setDescription("Least common = lowest Used %");
 
-      const lines = rows.map((r, i) =>
-        [
-          `${i + 1}. **${warscrollName(r) || "Unknown"}**`,
-          `Used: ${fmtPct(warscrollUsedPct(r), 0)} | Games: ${fmtInt(
-            warscrollGames(r)
-          )} | Win: ${fmtPct(warscrollWinPct(r), 0)}`,
-        ].join("\n")
-      );
+      const lines = rows.map((r, i) => {
+  const win = warscrollWinPct(r);
+  const winWo = warscrollWinWithoutPct(r);
+
+  return [
+    `${i + 1}. **${warscrollName(r) || "Unknown"}**`,
+    `Used: ${fmtPct(warscrollUsedPct(r), 0)} | Games: ${fmtInt(warscrollGames(r))} | ${fmtWinPair(win, winWo, 0)}`,
+  ].join("\n");
+});
 
       embed.addFields({ name: "Results", value: lines.join("\n\n") });
       addCachedLine(embed, warscrollCachedAt, factionCachedAt);
@@ -1264,14 +1273,12 @@ if (cmd === "factions") {
         const used = warscrollUsedPct(r);
         const games = warscrollGames(r);
 
-        return [
-          `${i + 1}. **${name}**`,
-          `Win: **${fmtPct(wWin, 1)}** (${fmtPP(lift)} vs faction) | Used: ${fmtPct(
-            used,
-            0
-          )} | Games: ${fmtInt(games)}`,
-        ].join("\n");
-      });
+        const winWo = warscrollWinWithoutPct(r);
+
+return [
+  `${i + 1}. **${name}**`,
+  `Win: **${fmtPct(wWin, 1)}** (${fmtPP(lift)} vs faction) | Win w/o: ${fmtPct(winWo, 1)} | Used: ${fmtPct(used, 0)} | Games: ${fmtInt(games)}`,
+].join("\n");
 
       embed.addFields({ name: "Results", value: lines.join("\n\n") });
       addCachedLine(embed, warscrollCachedAt, factionCachedAt);
