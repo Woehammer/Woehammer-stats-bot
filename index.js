@@ -1348,7 +1348,8 @@ chunks.forEach((chunk, idx) => {
 
 addCachedLine(embed, warscrollCachedAt, factionCachedAt);
 return interaction.editReply({ embeds: [embed] });
-
+    }
+  
 if (cmd === "faction") {
       const inputName = interaction.options.getString("name");
       const fQ = norm(inputName);
