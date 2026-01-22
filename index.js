@@ -113,6 +113,16 @@ function norm(s) {
     .toLowerCase();
 }
 
+function chunkText(text, max = 1024) {
+  const chunks = [];
+  let i = 0;
+  while (i < text.length) {
+    chunks.push(text.slice(i, i + max));
+    i += max;
+  }
+  return chunks;
+}
+
 function toNum(x) {
   const s = String(x ?? "").trim();
   if (!s) return NaN;
@@ -1183,7 +1193,15 @@ if (cmd === "factions") {
   ].join("\n");
 });
 
-      embed.addFields({ name: "Results", value: lines.join("\n\n") });
+    const resultsText = lines.join("\n\n");
+const chunks = chunkText(resultsText, 1024);
+
+chunks.forEach((chunk, idx) => {
+  embed.addFields({
+    name: idx === 0 ? "Results" : "Results (cont.)",
+    value: chunk,
+  });
+});
       addCachedLine(embed, warscrollCachedAt, factionCachedAt);
       return interaction.editReply({ embeds: [embed] });
     }
