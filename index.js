@@ -1245,15 +1245,27 @@ if (cmd === "factions") {
         return interaction.editReply({ embeds: [embed] });
       }
 
-      if (cmd === "impact") {
-        // Pulling UP: highest positive lift
-        enriched.sort((a, b) => b.lift - a.lift);
-      } else {
-        // Pulling DOWN: most negative lift
-        enriched.sort((a, b) => a.lift - b.lift);
-      }
+      let filtered = enriched;
 
-      const top10 = enriched.slice(0, 10);
+if (cmd === "impact") {
+  filtered = enriched.filter(x => x.lift > 0);
+  filtered.sort((a, b) => b.lift - a.lift);
+} else {
+  filtered = enriched.filter(x => x.lift < 0);
+  filtered.sort((a, b) => a.lift - b.lift);
+}
+
+const top10 = filtered.slice(0, 10);
+
+if (!top10.length) {
+  const embed = makeBaseEmbed("No results").setDescription(
+    cmd === "impact"
+      ? `No warscrolls are above ${baseName}'s overall win rate right now.`
+      : `No warscrolls are below ${baseName}'s overall win rate right now.`
+  );
+  addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+  return interaction.editReply({ embeds: [embed] });
+}
 
       const title =
         cmd === "impact"
