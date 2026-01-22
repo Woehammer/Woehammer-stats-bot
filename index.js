@@ -1286,9 +1286,9 @@ if (cmd === "factions") {
 embed.addFields({ name: "Results", value: lines.join("\n\n") });
 addCachedLine(embed, warscrollCachedAt, factionCachedAt);
 return interaction.editReply({ embeds: [embed] });
-    }
+} // ✅ CLOSES impact/leastimpact block
 
-    if (cmd === "faction") {
+if (cmd === "faction") {
       const inputName = interaction.options.getString("name");
       const fQ = norm(inputName);
 
