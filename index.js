@@ -1,4 +1,3 @@
-
 // index.js
 // Discord.js v14 single-file bot (ESM)
 //
@@ -114,6 +113,40 @@ function norm(s) {
     .toLowerCase();
 }
 
+function chunkText(text, max = 1024) {
+  const chunks = [];
+  let i = 0;
+  while (i < text.length) {
+    chunks.push(text.slice(i, i + max));
+    i += max;
+  }
+  return chunks;
+}
+
+function chunkByLines(lines, maxLen = 1024) {
+  const chunks = [];
+  let cur = "";
+
+  for (const line of lines) {
+    const add = (cur ? "\n\n" : "") + line;
+    if ((cur + add).length > maxLen) {
+      if (cur) chunks.push(cur);
+      // if a single line is too long, hard-split it
+      if (line.length > maxLen) {
+        chunkText(line, maxLen).forEach((c) => chunks.push(c));
+        cur = "";
+      } else {
+        cur = line;
+      }
+    } else {
+      cur += add;
+    }
+  }
+
+  if (cur) chunks.push(cur);
+  return chunks;
+}
+
 function toNum(x) {
   const s = String(x ?? "").trim();
   if (!s) return NaN;
@@ -170,6 +203,12 @@ function isAdmin(interaction) {
 
 function titleCaseMaybe(s) {
   return String(s ?? "").trim();
+}
+
+function fmtWinPair(withPct, withoutPct, decimals = 0) {
+  const w = fmtPct(withPct, decimals);
+  const wo = fmtPct(withoutPct, decimals);
+  return `Win: ${w} | Win w/o: ${wo}`;
 }
 
 // -------------------- Caches --------------------
@@ -263,8 +302,6 @@ const oss = warscrollCache
     used: warscrollUsedPct(r),
   }));
 
-console.log("Sample Ossiarch warscroll rows:\n", JSON.stringify(oss, null, 2));
-  
   if (FACTION_CSV_URL) {
     try {
       await loadFactions(true);
@@ -1046,16 +1083,19 @@ if (cmd === "factions") {
       );
 
       const lines = matches.map((r, i) => {
-        const name = warscrollName(r) || "Unknown";
-        return [
-          `${i + 1}. **${name}**`,
-          `Used: ${fmtPct(warscrollUsedPct(r), 0)} | Games: ${fmtInt(
-            warscrollGames(r)
-          )} | Win: ${fmtPct(warscrollWinPct(r), 0)} | Impact: ${fmtPP(
-            warscrollImpactPP(r)
-          )}`,
-        ].join("\n");
-      });
+  const name = warscrollName(r) || "Unknown";
+
+  const used = warscrollUsedPct(r);
+  const games = warscrollGames(r);
+  const win = warscrollWinPct(r);
+  const winWo = warscrollWinWithoutPct(r);
+  const impact = warscrollImpactPP(r); // if direct impact col missing, uses win - winWo
+
+  return [
+    `${i + 1}. **${name}**`,
+    `Used: ${fmtPct(used, 0)} | Games: ${fmtInt(games)} | ${fmtWinPair(win, winWo, 0)} | Impact: ${fmtPP(impact)}`,
+  ].join("\n");
+});
 
       embed.setDescription(lines.join("\n\n"));
       addCachedLine(embed, warscrollCachedAt, factionCachedAt);
@@ -1140,14 +1180,15 @@ if (cmd === "factions") {
         const embed = makeBaseEmbed(`Top 10 most common warscrolls — ${prettyFaction}`)
           .setDescription("Most common = highest Used %");
 
-        const lines = rows.map((r, i) =>
-          [
-            `${i + 1}. **${warscrollName(r) || "Unknown"}**`,
-            `Used: ${fmtPct(warscrollUsedPct(r), 0)} | Games: ${fmtInt(
-              warscrollGames(r)
-            )} | Win: ${fmtPct(warscrollWinPct(r), 0)}`,
-          ].join("\n")
-        );
+        const lines = rows.map((r, i) => {
+  const win = warscrollWinPct(r);
+  const winWo = warscrollWinWithoutPct(r);
+
+  return [
+    `${i + 1}. **${warscrollName(r) || "Unknown"}**`,
+    `Used: ${fmtPct(warscrollUsedPct(r), 0)} | Games: ${fmtInt(warscrollGames(r))} | ${fmtWinPair(win, winWo, 0)}`,
+  ].join("\n");
+});
 
         embed.addFields({ name: "Results", value: lines.join("\n\n") });
         addCachedLine(embed, warscrollCachedAt, factionCachedAt);
@@ -1166,16 +1207,25 @@ if (cmd === "factions") {
       const embed = makeBaseEmbed(`Bottom 10 least common warscrolls — ${prettyFaction}`)
         .setDescription("Least common = lowest Used %");
 
-      const lines = rows.map((r, i) =>
-        [
-          `${i + 1}. **${warscrollName(r) || "Unknown"}**`,
-          `Used: ${fmtPct(warscrollUsedPct(r), 0)} | Games: ${fmtInt(
-            warscrollGames(r)
-          )} | Win: ${fmtPct(warscrollWinPct(r), 0)}`,
-        ].join("\n")
-      );
+      const lines = rows.map((r, i) => {
+  const win = warscrollWinPct(r);
+  const winWo = warscrollWinWithoutPct(r);
 
-      embed.addFields({ name: "Results", value: lines.join("\n\n") });
+  return [
+    `${i + 1}. **${warscrollName(r) || "Unknown"}**`,
+    `Used: ${fmtPct(warscrollUsedPct(r), 0)} | Games: ${fmtInt(warscrollGames(r))} | ${fmtWinPair(win, winWo, 0)}`,
+  ].join("\n");
+});
+
+    const resultsText = lines.join("\n\n");
+const chunks = chunkText(resultsText, 1024);
+
+chunks.forEach((chunk, idx) => {
+  embed.addFields({
+    name: idx === 0 ? "Results" : "Results (cont.)",
+    value: chunk,
+  });
+});
       addCachedLine(embed, warscrollCachedAt, factionCachedAt);
       return interaction.editReply({ embeds: [embed] });
     }
@@ -1237,15 +1287,27 @@ if (cmd === "factions") {
         return interaction.editReply({ embeds: [embed] });
       }
 
-      if (cmd === "impact") {
-        // Pulling UP: highest positive lift
-        enriched.sort((a, b) => b.lift - a.lift);
-      } else {
-        // Pulling DOWN: most negative lift
-        enriched.sort((a, b) => a.lift - b.lift);
-      }
+      let filtered = enriched;
 
-      const top10 = enriched.slice(0, 10);
+if (cmd === "impact") {
+  filtered = enriched.filter(x => x.lift > 0);
+  filtered.sort((a, b) => b.lift - a.lift);
+} else {
+  filtered = enriched.filter(x => x.lift < 0);
+  filtered.sort((a, b) => a.lift - b.lift);
+}
+
+const top10 = filtered.slice(0, 10);
+
+if (!top10.length) {
+  const embed = makeBaseEmbed("No results").setDescription(
+    cmd === "impact"
+      ? `No warscrolls are above ${baseName}'s overall win rate right now.`
+      : `No warscrolls are below ${baseName}'s overall win rate right now.`
+  );
+  addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+  return interaction.editReply({ embeds: [embed] });
+}
 
       const title =
         cmd === "impact"
@@ -1259,27 +1321,35 @@ if (cmd === "factions") {
 
       const embed = makeBaseEmbed(title).setDescription(desc);
 
-      const lines = top10.map(({ r, lift }, i) => {
-        const name = warscrollName(r) || "Unknown";
-        const wWin = warscrollWinPct(r);
-        const used = warscrollUsedPct(r);
-        const games = warscrollGames(r);
+    const lines = top10.map(({ r, lift }, i) => {
+  const name = warscrollName(r) || "Unknown";
+  const wWin = warscrollWinPct(r);
+  const winWo = warscrollWinWithoutPct(r);
+  const used = warscrollUsedPct(r);
+  const games = warscrollGames(r);
 
-        return [
-          `${i + 1}. **${name}**`,
-          `Win: **${fmtPct(wWin, 1)}** (${fmtPP(lift)} vs faction) | Used: ${fmtPct(
-            used,
-            0
-          )} | Games: ${fmtInt(games)}`,
-        ].join("\n");
-      });
+  return [
+    `${i + 1}. **${name}**`,
+    `Win: **${fmtPct(wWin, 1)}** (${fmtPP(lift)} vs faction) | Win w/o: ${fmtPct(
+      winWo,
+      1
+    )} | Used: ${fmtPct(used, 0)} | Games: ${fmtInt(games)}`,
+  ].join("\n");
+});
 
-      embed.addFields({ name: "Results", value: lines.join("\n\n") });
-      addCachedLine(embed, warscrollCachedAt, factionCachedAt);
-      return interaction.editReply({ embeds: [embed] });
-    }
+const chunks = chunkByLines(lines, 1024);
 
-    if (cmd === "faction") {
+chunks.forEach((chunk, idx) => {
+  embed.addFields({
+    name: idx === 0 ? "Results" : "Results (cont.)",
+    value: chunk,
+  });
+});
+
+addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+return interaction.editReply({ embeds: [embed] });
+
+if (cmd === "faction") {
       const inputName = interaction.options.getString("name");
       const fQ = norm(inputName);
 
