@@ -1267,23 +1267,25 @@ if (cmd === "factions") {
 
       const embed = makeBaseEmbed(title).setDescription(desc);
 
-      const lines = top10.map(({ r, lift }, i) => {
-        const name = warscrollName(r) || "Unknown";
-        const wWin = warscrollWinPct(r);
-        const used = warscrollUsedPct(r);
-        const games = warscrollGames(r);
+    const lines = top10.map(({ r, lift }, i) => {
+  const name = warscrollName(r) || "Unknown";
+  const wWin = warscrollWinPct(r);
+  const winWo = warscrollWinWithoutPct(r);
+  const used = warscrollUsedPct(r);
+  const games = warscrollGames(r);
 
-        const winWo = warscrollWinWithoutPct(r);
+  return [
+    `${i + 1}. **${name}**`,
+    `Win: **${fmtPct(wWin, 1)}** (${fmtPP(lift)} vs faction) | Win w/o: ${fmtPct(
+      winWo,
+      1
+    )} | Used: ${fmtPct(used, 0)} | Games: ${fmtInt(games)}`,
+  ].join("\n");
+});
 
-return [
-  `${i + 1}. **${name}**`,
-  `Win: **${fmtPct(wWin, 1)}** (${fmtPP(lift)} vs faction) | Win w/o: ${fmtPct(winWo, 1)} | Used: ${fmtPct(used, 0)} | Games: ${fmtInt(games)}`,
-].join("\n");
-
-      embed.addFields({ name: "Results", value: lines.join("\n\n") });
-      addCachedLine(embed, warscrollCachedAt, factionCachedAt);
-      return interaction.editReply({ embeds: [embed] });
-    }
+embed.addFields({ name: "Results", value: lines.join("\n\n") });
+addCachedLine(embed, warscrollCachedAt, factionCachedAt);
+return interaction.editReply({ embeds: [embed] });
 
     if (cmd === "faction") {
       const inputName = interaction.options.getString("name");
