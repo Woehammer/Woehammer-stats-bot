@@ -123,6 +123,30 @@ function chunkText(text, max = 1024) {
   return chunks;
 }
 
+function chunkByLines(lines, maxLen = 1024) {
+  const chunks = [];
+  let cur = "";
+
+  for (const line of lines) {
+    const add = (cur ? "\n\n" : "") + line;
+    if ((cur + add).length > maxLen) {
+      if (cur) chunks.push(cur);
+      // if a single line is too long, hard-split it
+      if (line.length > maxLen) {
+        chunkText(line, maxLen).forEach((c) => chunks.push(c));
+        cur = "";
+      } else {
+        cur = line;
+      }
+    } else {
+      cur += add;
+    }
+  }
+
+  if (cur) chunks.push(cur);
+  return chunks;
+}
+
 function toNum(x) {
   const s = String(x ?? "").trim();
   if (!s) return NaN;
@@ -1313,10 +1337,17 @@ if (!top10.length) {
   ].join("\n");
 });
 
-embed.addFields({ name: "Results", value: lines.join("\n\n") });
+const chunks = chunkByLines(lines, 1024);
+
+chunks.forEach((chunk, idx) => {
+  embed.addFields({
+    name: idx === 0 ? "Results" : "Results (cont.)",
+    value: chunk,
+  });
+});
+
 addCachedLine(embed, warscrollCachedAt, factionCachedAt);
 return interaction.editReply({ embeds: [embed] });
-} // ✅ CLOSES impact/leastimpact block
 
 if (cmd === "faction") {
       const inputName = interaction.options.getString("name");
