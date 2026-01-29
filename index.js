@@ -1383,17 +1383,14 @@ if (cmd === "league") {
   const embed = makeBaseEmbed(`Player Profile — ${playerName}`);
   if (leagueName) embed.setDescription(`League: **${leagueName}**`);
 
-  // Army list
-  const listText = String(lpList(row) ?? "").trim();
-  embed.addFields({
-    name: "Army List",
-    // Army list (fields max 1024 chars)
+// Army list (embed fields max 1024 chars)
   const listText = String(lpList(row) ?? "").trim();
 
   if (!listText) {
     embed.addFields({ name: "Army List", value: "No list submitted." });
   } else {
     const listChunks = chunkText(listText, 1024);
+
     listChunks.slice(0, 6).forEach((chunk, idx) => {
       embed.addFields({
         name: idx === 0 ? "Army List" : "Army List (cont.)",
