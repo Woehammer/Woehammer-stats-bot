@@ -279,6 +279,7 @@ async function ensureFactions() {
 async function refreshAllSoft() {
   let warscrollOk = null;
   let factionOk = null;
+  let leagueOk = null;
 
   if (SHEET_CSV_URL) {
     try {
@@ -289,18 +290,6 @@ async function refreshAllSoft() {
       console.warn("Warscroll refresh failed; keeping cache:", e?.message ?? e);
     }
   }
-console.log("Warscroll rows loaded:", warscrollCache.length);
-
-const oss = warscrollCache
-  .filter(r => norm(warscrollFaction(r)).includes("ossiarch"))
-  .slice(0, 5)
-  .map(r => ({
-    faction: warscrollFaction(r),
-    name: warscrollName(r),
-    games: warscrollGames(r),
-    win: warscrollWinPct(r),
-    used: warscrollUsedPct(r),
-  }));
 
   if (FACTION_CSV_URL) {
     try {
@@ -312,8 +301,18 @@ const oss = warscrollCache
     }
   }
 
-  return { warscrollOk, factionOk };
-}
+  if (LEAGUE_PLAYERS_CSV_URL) {
+    try {
+      await loadLeaguePlayers(true);
+      leagueOk = true;
+    } catch (e) {
+      leagueOk = false;
+      console.warn("League refresh failed; keeping cache:", e?.message ?? e);
+    }
+  }
+
+  return { warscrollOk, factionOk, leagueOk };
+                   }
 
 // -------------------- Column getters (tolerant to header changes) --------------------
 function getCol(row, candidates) {
