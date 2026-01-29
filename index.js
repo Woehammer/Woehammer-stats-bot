@@ -906,6 +906,13 @@ client.once(Events.ClientReady, async () => {
         console.warn("Warscroll cache warm failed:", e?.message ?? e);
       }
     }
+    if (LEAGUE_PLAYERS_CSV_URL) {
+  try {
+    await loadLeaguePlayers(true);
+  } catch (e) {
+    console.warn("League cache warm failed:", e?.message ?? e);
+  }
+    }
     console.log("✅ Cache warm attempt complete.");
   } catch (e) {
     console.warn("Cache warm failed:", e?.message ?? e);
@@ -1042,7 +1049,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.editReply({ embeds: [embed] });
       }
 
-      const { warscrollOk, factionOk } = await refreshAllSoft();
+      const { warscrollOk, factionOk, leagueOk } = await refreshAllSoft();
 
       const lines = [];
       if (warscrollOk !== null) {
