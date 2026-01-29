@@ -762,6 +762,16 @@ client.once(Events.ClientReady, async () => {
           .setRequired(false)
           .setAutocomplete(true)
       ),
+    
+    new SlashCommandBuilder()
+  .setName("league")
+  .setDescription("Show a player's army list, fixtures, and results")
+  .addStringOption((o) =>
+    o
+      .setName("name")
+      .setDescription("Player name")
+      .setRequired(true)
+  ),
 
     // -------------------- Discovery commands --------------------
     new SlashCommandBuilder()
@@ -1349,7 +1359,64 @@ chunks.forEach((chunk, idx) => {
 addCachedLine(embed, warscrollCachedAt, factionCachedAt);
 return interaction.editReply({ embeds: [embed] });
     }
-  
+
+if (cmd === "league") {
+  await ensureLeaguePlayers();
+
+  const input = interaction.options.getString("name");
+  const q = norm(input);
+
+  const row = leaguePlayersCache.find(r =>
+    norm(lpPlayer(r)).includes(q)
+  );
+
+  if (!row) {
+    const embed = makeBaseEmbed("No results")
+      .setDescription(`No league player found for "${input}".`);
+    leagueCachedFooter(embed);
+    return interaction.editReply({ embeds: [embed] });
+  }
+
+  const playerName = lpPlayer(row);
+  const leagueName = lpLeague(row);
+
+  const embed = makeBaseEmbed(`Player Profile — ${playerName}`);
+  if (leagueName) embed.setDescription(`League: **${leagueName}**`);
+
+  // Army list
+  const listText = String(lpList(row) ?? "").trim();
+  embed.addFields({
+    name: "Army List",
+    value: listText ? listText.slice(0, 3500) : "No list submitted.",
+  });
+
+  // Fixtures
+  const fixtures = lpOpponents(row)
+    .map((o, i) => o ? `Round ${i + 1}: ${o}` : null)
+    .filter(Boolean);
+
+  embed.addFields({
+    name: "Fixtures",
+    value: fixtures.length ? fixtures.join("\n") : "No fixtures available.",
+  });
+
+  // Results
+  embed.addFields({
+    name: "Results",
+    value: [
+      `Played: **${fmtInt(lpGames(row))}**`,
+      `Won: **${fmtInt(lpW(row))}**`,
+      `Drew: **${fmtInt(lpD(row))}**`,
+      `Lost: **${fmtInt(lpL(row))}**`,
+      `Points: **${fmtInt(lpPts(row))}**`,
+    ].join("\n"),
+    inline: true,
+  });
+
+  leagueCachedFooter(embed);
+  return interaction.editReply({ embeds: [embed] });
+}
+    
 if (cmd === "faction") {
       const inputName = interaction.options.getString("name");
       const fQ = norm(inputName);
@@ -1466,5 +1533,68 @@ if (cmd === "faction") {
     }
   }
 });
+
+// ==================================================
+// LEAGUE MODULE (CSV -> /league)
+// PURPOSE: Show a player's list, fixtures, and results from a league CSV
+// ENV: LEAGUE_PLAYERS_CSV_URL
+// ==================================================
+
+const LEAGUE_PLAYERS_CSV_URL = process.env.LEAGUE_PLAYERS_CSV_URL;
+
+let leaguePlayersCache = [];
+let leaguePlayersCachedAt = null;
+
+async function loadLeaguePlayers(force = false) {
+  if (!LEAGUE_PLAYERS_CSV_URL) throw new Error("Missing LEAGUE_PLAYERS_CSV_URL env var");
+  if (!force && leaguePlayersCache.length) return;
+
+  leaguePlayersCache = await fetchCSV(LEAGUE_PLAYERS_CSV_URL, { cacheBust: force });
+  leaguePlayersCachedAt = new Date();
+}
+
+async function ensureLeaguePlayers() {
+  try {
+    await loadLeaguePlayers(false);
+  } catch (e) {
+    if (!leaguePlayersCache.length) throw e;
+    console.warn("League player fetch failed; using cached:", e?.message ?? e);
+  }
+}
+
+function leagueCachedFooter(embed) {
+  const cached = leaguePlayersCachedAt ? nowStr(leaguePlayersCachedAt) : "—";
+  // Keep your existing footer format; just tack league cache info onto it
+  const base = embed.data?.footer?.text || "Source: Woehammer GT Database";
+  embed.setFooter({ text: `${base} • League: ${cached}` });
+  return embed;
+}
+
+// ---------- League CSV column helpers ----------
+function lp(row, candidates) {
+  return getCol(row, candidates);
+}
+
+const lpPlayer = (r) => lp(r, ["Player", "player", "Name", "name"]);
+const lpLeague  = (r) => lp(r, ["League", "league"]);
+const lpList    = (r) => lp(r, ["Lists", "List", "lists", "list"]);
+
+const lpOpponents = (r) => ([
+  lp(r, ["Rnd 1 Opponent", "Round 1 Opponent", "R1 Opponent"]),
+  lp(r, ["Rnd 2 Opponent", "Round 2 Opponent", "R2 Opponent"]),
+  lp(r, ["Rnd 3 Opponent", "Round 3 Opponent", "R3 Opponent"]),
+  lp(r, ["Rnd 4 Opponent", "Round 4 Opponent", "R4 Opponent"]),
+  lp(r, ["Rnd 5 Opponent", "Round 5 Opponent", "R5 Opponent"]),
+]);
+
+const lpGames = (r) => toNum(lp(r, ["Games", "games", "Played"]));
+const lpW     = (r) => toNum(lp(r, ["W", "w", "Wins"]));
+const lpD     = (r) => toNum(lp(r, ["D", "d", "Draws"]));
+const lpL     = (r) => toNum(lp(r, ["L", "l", "Losses"]));
+const lpPts   = (r) => toNum(lp(r, ["Pts", "pts", "Points"]));
+
+function safeFilename(s) {
+  return norm(s).replace(/[^\w\-]+/g, "-").replace(/\-+/g, "-").replace(/^\-|\-$/g, "");
+}
 
 client.login(TOKEN);
