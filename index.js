@@ -603,6 +603,12 @@ function formatTopWarscrollsBlock(list) {
 // Notes:
 // - Autocomplete requires option.setAutocomplete(true) in your SlashCommand definitions.
 // - This code only *provides suggestions*; it does not change your existing commands yet.
+function getLeaguePlayers() {
+  const names = leaguePlayersCache
+    .map((r) => lpPlayer(r))
+    .map((x) => String(x ?? "").trim());
+  return uniq(names);
+      }
 
 function uniq(arr) {
   return [...new Set(arr.filter(Boolean))];
@@ -771,6 +777,7 @@ client.once(Events.ClientReady, async () => {
       .setName("name")
       .setDescription("Player name")
       .setRequired(true)
+      .setAutocomplete(true)
   ),
 
     // -------------------- Discovery commands --------------------
@@ -869,6 +876,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
       } catch {}
     }
 
+    if (["league"].includes(cmd)) {
+  try {
+    await ensureLeaguePlayers();
+  } catch {}
+    }
+
     // Helper for responding safely
     const safeRespond = async (choices) => {
       try {
@@ -914,6 +927,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (cmd === "warscrolls" && focused.name === "faction") {
       const choices = makeChoices(getAllFactions(), typed);
       return safeRespond(choices);
+    }
+
+    if (cmd === "league" && focused.name === "name") {
+  const choices = makeChoices(getLeaguePlayers(), typed);
+  return safeRespond(choices);
     }
 
     // Nothing matched
