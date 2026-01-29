@@ -50,6 +50,32 @@ http
   .listen(PORT, () => {
     console.log(`Healthcheck server listening on ${PORT}`);
   });
+// ==================================================
+// LEAGUE PLAYER PROFILES: CACHE
+// ==================================================
+const LEAGUE_PLAYERS_CSV_URL = process.env.LEAGUE_PLAYERS_CSV_URL;
+
+let leaguePlayersCache = [];
+let leaguePlayersCachedAt = null;
+
+async function loadLeaguePlayers(force = false) {
+  if (!LEAGUE_PLAYERS_CSV_URL)
+    throw new Error("Missing LEAGUE_PLAYERS_CSV_URL env var");
+
+  if (!force && leaguePlayersCache.length) return;
+
+  leaguePlayersCache = await fetchCSV(LEAGUE_PLAYERS_CSV_URL, { cacheBust: force });
+  leaguePlayersCachedAt = new Date();
+}
+
+async function ensureLeaguePlayers() {
+  try {
+    await loadLeaguePlayers(false);
+  } catch (e) {
+    if (!leaguePlayersCache.length) throw e;
+    console.warn("League player fetch failed; using cached:", e?.message ?? e);
+  }
+}
 
 // -------------------- CSV parsing (handles quotes reasonably) --------------------
 function parseCSV(text) {
@@ -210,6 +236,30 @@ function fmtWinPair(withPct, withoutPct, decimals = 0) {
   const wo = fmtPct(withoutPct, decimals);
   return `Win: ${w} | Win w/o: ${wo}`;
 }
+// ==================================================
+// LEAGUE PLAYER COLUMN HELPERS
+// ==================================================
+function lp(row, names) {
+  return getCol(row, names);
+}
+
+const lpPlayer = r => lp(r, ["Player"]);
+const lpLeague = r => lp(r, ["League"]);
+const lpList = r => lp(r, ["Lists", "List"]);
+
+const lpOpponents = r => ([
+  lp(r, ["Rnd 1 Opponent"]),
+  lp(r, ["Rnd 2 Opponent"]),
+  lp(r, ["Rnd 3 Opponent"]),
+  lp(r, ["Rnd 4 Opponent"]),
+  lp(r, ["Rnd 5 Opponent"]),
+]);
+
+const lpGames = r => toNum(lp(r, ["Games"]));
+const lpW = r => toNum(lp(r, ["W"]));
+const lpD = r => toNum(lp(r, ["D"]));
+const lpL = r => toNum(lp(r, ["L"]));
+const lpPts = r => toNum(lp(r, ["Pts"]));
 
 // -------------------- Caches --------------------
 let warscrollCache = [];
@@ -762,6 +812,14 @@ client.once(Events.ClientReady, async () => {
           .setRequired(false)
           .setAutocomplete(true)
       ),
+new SlashCommandBuilder()
+  .setName("league")
+  .setDescription("Show a player's army list, fixtures, and results")
+  .addStringOption(o =>
+    o.setName("name")
+     .setDescription("Player name")
+     .setRequired(true)
+  ),
 
     // -------------------- Discovery commands --------------------
     new SlashCommandBuilder()
@@ -1446,7 +1504,70 @@ if (cmd === "faction") {
       addCachedLine(embed, warscrollCachedAt, factionCachedAt);
       return interaction.editReply({ embeds: [embed] });
     }
+if (cmd === "league") {
+  await ensureLeaguePlayers();
 
+  const input = interaction.options.getString("name");
+  const q = norm(input);
+
+  const row = leaguePlayersCache.find(r =>
+    norm(lpPlayer(r)).includes(q)
+  );
+
+  if (!row) {
+    const embed = makeBaseEmbed("No results")
+      .setDescription(`No league player found for "${input}".`);
+    return interaction.editReply({ embeds: [embed] });
+  }
+
+  const embed = makeBaseEmbed(`Player Profile — ${lpPlayer(row)}`);
+
+  // ---------------- Army List ----------------
+  const listText = String(lpList(row) ?? "").trim();
+  const listBlock =
+    listText.length > 3500
+      ? "List is long — see attached file."
+      : listText;
+
+  embed.addFields({
+    name: "Army List",
+    value: listBlock || "No list submitted.",
+  });
+
+  // ---------------- Fixtures ----------------
+  const fixtures = lpOpponents(row)
+    .map((opp, i) => opp ? `Round ${i + 1}: ${opp}` : null)
+    .filter(Boolean);
+
+  embed.addFields({
+    name: "Fixtures",
+    value: fixtures.length ? fixtures.join("\n") : "No fixtures available.",
+  });
+
+  // ---------------- Results ----------------
+  embed.addFields({
+    name: "Results",
+    value: [
+      `Played: **${fmtInt(lpGames(row))}**`,
+      `Won: **${fmtInt(lpW(row))}**`,
+      `Drew: **${fmtInt(lpD(row))}**`,
+      `Lost: **${fmtInt(lpL(row))}**`,
+      `Points: **${fmtInt(lpPts(row))}**`,
+    ].join("\n"),
+    inline: true,
+  });
+
+  // Attach list if too long
+  if (listText.length > 3500) {
+    const file = {
+      attachment: Buffer.from(listText, "utf8"),
+      name: `${norm(lpPlayer(row)).replace(/\s+/g, "-")}-army-list.txt`,
+    };
+    return interaction.editReply({ embeds: [embed], files: [file] });
+  }
+
+  return interaction.editReply({ embeds: [embed] });
+}
     const fallback = makeBaseEmbed("❌ Unknown command").setDescription("Try `/help`.");
     addCachedLine(fallback, warscrollCachedAt, factionCachedAt);
     return interaction.editReply({ embeds: [fallback] });
