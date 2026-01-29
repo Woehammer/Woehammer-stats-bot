@@ -593,7 +593,68 @@ function formatTopWarscrollsBlock(list) {
 
   return [`**Most-used warscrolls**`, ...lines].join("\n");
 }
+// ==================================================
+// LEAGUE MODULE (CSV -> /league)
+// PURPOSE: Show a player's list, fixtures, and results from a league CSV
+// ENV: LEAGUE_PLAYERS_CSV_URL
+// ==================================================
 
+const LEAGUE_PLAYERS_CSV_URL = process.env.LEAGUE_PLAYERS_CSV_URL;
+
+let leaguePlayersCache = [];
+let leaguePlayersCachedAt = null;
+
+async function loadLeaguePlayers(force = false) {
+  if (!LEAGUE_PLAYERS_CSV_URL) throw new Error("Missing LEAGUE_PLAYERS_CSV_URL env var");
+  if (!force && leaguePlayersCache.length) return;
+
+  leaguePlayersCache = await fetchCSV(LEAGUE_PLAYERS_CSV_URL, { cacheBust: force });
+  leaguePlayersCachedAt = new Date();
+}
+
+async function ensureLeaguePlayers() {
+  try {
+    await loadLeaguePlayers(false);
+  } catch (e) {
+    if (!leaguePlayersCache.length) throw e;
+    console.warn("League player fetch failed; using cached:", e?.message ?? e);
+  }
+}
+
+function leagueCachedFooter(embed) {
+  const cached = leaguePlayersCachedAt ? nowStr(leaguePlayersCachedAt) : "—";
+  // Keep your existing footer format; just tack league cache info onto it
+  const base = embed.data?.footer?.text || "Source: Woehammer GT Database";
+  embed.setFooter({ text: `${base} • League: ${cached}` });
+  return embed;
+}
+
+// ---------- League CSV column helpers ----------
+function lp(row, candidates) {
+  return getCol(row, candidates);
+}
+
+const lpPlayer = (r) => lp(r, ["Player", "player", "Name", "name"]);
+const lpLeague  = (r) => lp(r, ["League", "league"]);
+const lpList    = (r) => lp(r, ["Lists", "List", "lists", "list"]);
+
+const lpOpponents = (r) => ([
+  lp(r, ["Rnd 1 Opponent", "Round 1 Opponent", "R1 Opponent"]),
+  lp(r, ["Rnd 2 Opponent", "Round 2 Opponent", "R2 Opponent"]),
+  lp(r, ["Rnd 3 Opponent", "Round 3 Opponent", "R3 Opponent"]),
+  lp(r, ["Rnd 4 Opponent", "Round 4 Opponent", "R4 Opponent"]),
+  lp(r, ["Rnd 5 Opponent", "Round 5 Opponent", "R5 Opponent"]),
+]);
+
+const lpGames = (r) => toNum(lp(r, ["Games", "games", "Played"]));
+const lpW     = (r) => toNum(lp(r, ["W", "w", "Wins"]));
+const lpD     = (r) => toNum(lp(r, ["D", "d", "Draws"]));
+const lpL     = (r) => toNum(lp(r, ["L", "l", "Losses"]));
+const lpPts   = (r) => toNum(lp(r, ["Pts", "pts", "Points"]));
+
+function safeFilename(s) {
+  return norm(s).replace(/[^\w\-]+/g, "-").replace(/\-+/g, "-").replace(/^\-|\-$/g, "");
+}
 // -------------------- Discovery + Autocomplete helpers --------------------
 //
 // Goal:
@@ -1567,68 +1628,5 @@ if (cmd === "faction") {
     }
   }
 });
-
-// ==================================================
-// LEAGUE MODULE (CSV -> /league)
-// PURPOSE: Show a player's list, fixtures, and results from a league CSV
-// ENV: LEAGUE_PLAYERS_CSV_URL
-// ==================================================
-
-const LEAGUE_PLAYERS_CSV_URL = process.env.LEAGUE_PLAYERS_CSV_URL;
-
-let leaguePlayersCache = [];
-let leaguePlayersCachedAt = null;
-
-async function loadLeaguePlayers(force = false) {
-  if (!LEAGUE_PLAYERS_CSV_URL) throw new Error("Missing LEAGUE_PLAYERS_CSV_URL env var");
-  if (!force && leaguePlayersCache.length) return;
-
-  leaguePlayersCache = await fetchCSV(LEAGUE_PLAYERS_CSV_URL, { cacheBust: force });
-  leaguePlayersCachedAt = new Date();
-}
-
-async function ensureLeaguePlayers() {
-  try {
-    await loadLeaguePlayers(false);
-  } catch (e) {
-    if (!leaguePlayersCache.length) throw e;
-    console.warn("League player fetch failed; using cached:", e?.message ?? e);
-  }
-}
-
-function leagueCachedFooter(embed) {
-  const cached = leaguePlayersCachedAt ? nowStr(leaguePlayersCachedAt) : "—";
-  // Keep your existing footer format; just tack league cache info onto it
-  const base = embed.data?.footer?.text || "Source: Woehammer GT Database";
-  embed.setFooter({ text: `${base} • League: ${cached}` });
-  return embed;
-}
-
-// ---------- League CSV column helpers ----------
-function lp(row, candidates) {
-  return getCol(row, candidates);
-}
-
-const lpPlayer = (r) => lp(r, ["Player", "player", "Name", "name"]);
-const lpLeague  = (r) => lp(r, ["League", "league"]);
-const lpList    = (r) => lp(r, ["Lists", "List", "lists", "list"]);
-
-const lpOpponents = (r) => ([
-  lp(r, ["Rnd 1 Opponent", "Round 1 Opponent", "R1 Opponent"]),
-  lp(r, ["Rnd 2 Opponent", "Round 2 Opponent", "R2 Opponent"]),
-  lp(r, ["Rnd 3 Opponent", "Round 3 Opponent", "R3 Opponent"]),
-  lp(r, ["Rnd 4 Opponent", "Round 4 Opponent", "R4 Opponent"]),
-  lp(r, ["Rnd 5 Opponent", "Round 5 Opponent", "R5 Opponent"]),
-]);
-
-const lpGames = (r) => toNum(lp(r, ["Games", "games", "Played"]));
-const lpW     = (r) => toNum(lp(r, ["W", "w", "Wins"]));
-const lpD     = (r) => toNum(lp(r, ["D", "d", "Draws"]));
-const lpL     = (r) => toNum(lp(r, ["L", "l", "Losses"]));
-const lpPts   = (r) => toNum(lp(r, ["Pts", "pts", "Points"]));
-
-function safeFilename(s) {
-  return norm(s).replace(/[^\w\-]+/g, "-").replace(/\-+/g, "-").replace(/^\-|\-$/g, "");
-}
 
 client.login(TOKEN);
