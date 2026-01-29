@@ -1387,8 +1387,27 @@ if (cmd === "league") {
   const listText = String(lpList(row) ?? "").trim();
   embed.addFields({
     name: "Army List",
-    value: listText ? listText.slice(0, 3500) : "No list submitted.",
-  });
+    // Army list (fields max 1024 chars)
+  const listText = String(lpList(row) ?? "").trim();
+
+  if (!listText) {
+    embed.addFields({ name: "Army List", value: "No list submitted." });
+  } else {
+    const listChunks = chunkText(listText, 1024);
+    listChunks.slice(0, 6).forEach((chunk, idx) => {
+      embed.addFields({
+        name: idx === 0 ? "Army List" : "Army List (cont.)",
+        value: chunk,
+      });
+    });
+
+    if (listChunks.length > 6) {
+      embed.addFields({
+        name: "Army List (truncated)",
+        value: `List is long — showing first ${6 * 1024} characters.`,
+      });
+    }
+  }
 
   // Fixtures
   const fixtures = lpOpponents(row)
