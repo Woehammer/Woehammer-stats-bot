@@ -105,6 +105,14 @@ function parseCSV(text) {
 }
 
 // -------------------- Helpers --------------------
+const LEAGUE_BATTLEPLANS = [
+  "Paths of the Fey",
+  "The Liferoots",
+  "Surge of Slaughter",
+  "Lifecycle",
+  "Roiling Roots",
+];
+
 function norm(s) {
   return String(s ?? "")
     .replace(/\u00A0/g, " ")   // NBSP -> space (Google Sheets loves these)
@@ -1491,15 +1499,19 @@ if (cmd === "league") {
     }
   }
 
-  // Fixtures
-  const fixtures = lpOpponents(row)
-    .map((o, i) => o ? `Round ${i + 1}: ${o}` : null)
-    .filter(Boolean);
+  // Fixtures + Battleplans
+const opps = lpOpponents(row);
 
-  embed.addFields({
-    name: "Fixtures",
-    value: fixtures.length ? fixtures.join("\n") : "No fixtures available.",
-  });
+const fixtureLines = opps.map((o, i) => {
+  const bp = LEAGUE_BATTLEPLANS[i] ?? "—";
+  const oppTxt = o ? o : "—";
+  return `Round ${i + 1}: ${oppTxt} — **${bp}**`;
+});
+
+embed.addFields({
+  name: "Fixtures & Battleplans",
+  value: fixtureLines.length ? fixtureLines.join("\n") : "No fixtures available.",
+});
 
   // Results
   embed.addFields({
